@@ -52,8 +52,7 @@ static void interface_xdp_try_detach(int ifindex, const char *ifname) {
         XDP_FLAGS_HW_MODE,
     };
     for (size_t i = 0; i < sizeof(modes) / sizeof(modes[0]); i++) {
-        int r = bpf_xdp_detach
-        (ifindex, -1, modes[i]);
+        int r = bpf_xdp_detach(ifindex, modes[i], NULL);
         if (r < 0) {
             int e = -r;
             if (e != EINVAL && e != EOPNOTSUPP && e != ENODEV && e != ENOENT && ifname)
@@ -341,7 +340,7 @@ int interface_init_local(struct xsk_interface *iface,
 
     prog = bpf_object__find_program_by_name(bpf_obj, "xdp_redirect_prog");
     prog_fd = bpf_program__fd(prog);
-    ret = bpf_xdp_detach(iface->ifindex, prog_fd, XDP_FLAGS_SKB_MODE);
+    ret = bpf_xdp_attach(iface->ifindex, prog_fd, XDP_FLAGS_SKB_MODE, NULL);
     if (ret) {
         fprintf(stderr, "bpf_set_link_xdp_fd failed: %d (%s)\n", ret,
                 ret < 0 ? strerror(-ret) : "non-negative");
@@ -584,7 +583,7 @@ int interface_init_wan_rx(struct xsk_interface *iface,
         iface->queue_count++;
     }
 
-    ret = bpf_xdp_detach(iface->ifindex, prog_fd, XDP_FLAGS_SKB_MODE);
+    ret = bpf_xdp_attach(iface->ifindex, prog_fd, XDP_FLAGS_SKB_MODE, NULL);
     if (ret) {
         fprintf(stderr, "WAN bpf_set_link_xdp_fd failed: %d\n", ret);
         goto err_queues;
