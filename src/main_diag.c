@@ -211,4 +211,6 @@ void main_diag_log_loaded_config(struct app_config *cfg, int config_id) {
             cfg->policy_count);
     log_crypto_policies_human(cfg, config_id);
     log_wan_l2_resolution_plan(cfg);
+    fprintf(stderr, "[XDP REDIRECT] src_rules=%u dst_rules=%u\n",
+            cfg->redirect.src_count, cfg->redirect.dst_count);
 }

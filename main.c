@@ -303,6 +303,45 @@ static void append_redirect_unique(struct app_config *dst, const struct app_conf
     }
 }
 
+static void append_redirect_from_profiles(struct app_config *cfg) {
+    for (int pi = 0; pi < cfg->profile_count; pi++) {
+        const struct profile_config *p = &cfg->profiles[pi];
+        if (!p->enabled)
+            continue;
+        for (int ri = 0; ri < p->traffic_rule_count; ri++) {
+            const struct profile_traffic_rule *tr = &p->traffic_rules[ri];
+
+            int src_exists = 0;
+            for (uint32_t i = 0; i < cfg->redirect.src_count; i++) {
+                if (cfg->redirect.src_net[i] == tr->src_net &&
+                    cfg->redirect.src_mask[i] == tr->src_mask) {
+                    src_exists = 1;
+                    break;
+                }
+            }
+            if (!src_exists && cfg->redirect.src_count < MAX_SRC_NETS) {
+                uint32_t k = cfg->redirect.src_count++;
+                cfg->redirect.src_net[k] = tr->src_net;
+                cfg->redirect.src_mask[k] = tr->src_mask;
+            }
+
+            int dst_exists = 0;
+            for (uint32_t i = 0; i < cfg->redirect.dst_count; i++) {
+                if (cfg->redirect.dst_net[i] == tr->dst_net &&
+                    cfg->redirect.dst_mask[i] == tr->dst_mask) {
+                    dst_exists = 1;
+                    break;
+                }
+            }
+            if (!dst_exists && cfg->redirect.dst_count < MAX_DST_NETS) {
+                uint32_t k = cfg->redirect.dst_count++;
+                cfg->redirect.dst_net[k] = tr->dst_net;
+                cfg->redirect.dst_mask[k] = tr->dst_mask;
+            }
+        }
+    }
+}
+
 static int merge_one_config(struct app_config *dst, const struct app_config *src) {
     int local_map[MAX_INTERFACES];
     int wan_map[MAX_INTERFACES];
@@ -388,6 +427,9 @@ static int build_merged_config(struct app_config *out_cfg, const int *ids, int i
         if (merge_one_config(&merged, &tmp) != 0)
             return -1;
     }
+
+    /* Ensure redirect covers all active profile traffic rules. */
+    append_redirect_from_profiles(&merged);
 
     merged.crypto_enabled = (merged.policy_count > 0) ? 1 : 0;
     if (merged.crypto_enabled) {
