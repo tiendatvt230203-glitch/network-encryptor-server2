@@ -573,6 +573,12 @@ int main(int argc, char **argv) {
 
     for (;;) {
         int pq_fd = PQsocket(listen_conn);
+        if (pq_fd < 0) {
+            PQreset(listen_conn);
+            PQclear(PQexec(listen_conn, "LISTEN " NOTIFY_CHANNEL));
+            usleep(200000);
+            continue;
+        }
         fd_set rfds;
         FD_ZERO(&rfds);
         FD_SET(pq_fd, &rfds);
