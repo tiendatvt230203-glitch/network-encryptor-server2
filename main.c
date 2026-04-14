@@ -30,13 +30,14 @@ static void usage(const char *prog) {
             "Usage:\n"
             "  %s               # daemon mode (LISTEN %s)\n"
             "  %s -id <ID>       # notify daemon to apply config already stored in DB\n"
+            "  %s -check [ID]    # check database config consistency\n"
             "\n"
             "The backend must persist config for <ID> in PostgreSQL first.\n"
             "This process only verifies the row exists and sends pg_notify.\n"
             "\n"
             "Env: DB_* is read from the environment (optionally via /opt/db.env).\n"
             "Required: DB_PASS or PGPASSWORD (or /opt/db.env).\n",
-            prog, NOTIFY_CHANNEL, prog);
+            prog, NOTIFY_CHANNEL, prog, prog);
 }
 
 static void load_env_from_file(const char *path) {
@@ -109,6 +110,116 @@ static int parse_config_id_arg(const char *s, int *out) {
     long v = strtol(s, NULL, 10);
     if (v < 0 || v > INT_MAX) return -1;
     *out = (int)v;
+    return 0;
+}
+
+static int run_db_check(const char *const *keywords, const char *const *values, int only_id) {
+    PGconn *conn = PQconnectdbParams(keywords, values, 0);
+    if (PQstatus(conn) != CONNECTION_OK) {
+        fprintf(stderr, "[CHECK] DB connection failed: %s", PQerrorMessage(conn));
+        PQfinish(conn);
+        return 1;
+    }
+
+    char where_buf[64] = {0};
+    if (only_id >= 0)
+        snprintf(where_buf, sizeof(where_buf), "WHERE c.id = %d", only_id);
+
+    char sql[4096];
+    snprintf(sql, sizeof(sql),
+             "SELECT c.id, "
+             "COUNT(DISTINCT p.id) AS profiles, "
+             "COUNT(DISTINCT l.id) AS locals, "
+             "COUNT(DISTINCT w.id) AS wans, "
+             "COUNT(DISTINCT tr.id) AS traffic_rules, "
+             "COUNT(DISTINCT cp.id) AS policies "
+             "FROM xdp_configs c "
+             "LEFT JOIN xdp_profiles p ON p.config_id = c.id "
+             "LEFT JOIN xdp_local_configs l ON l.config_id = c.id "
+             "LEFT JOIN xdp_wan_configs w ON w.config_id = c.id "
+             "LEFT JOIN xdp_profile_traffic_rules tr ON tr.profile_id = p.id "
+             "LEFT JOIN xdp_profile_crypto_policies cp ON cp.profile_id = p.id "
+             "%s "
+             "GROUP BY c.id "
+             "ORDER BY c.id;",
+             where_buf);
+
+    PGresult *res = PQexec(conn, sql);
+    if (PQresultStatus(res) != PGRES_TUPLES_OK) {
+        fprintf(stderr, "[CHECK] summary query failed: %s", PQresultErrorMessage(res));
+        PQclear(res);
+        PQfinish(conn);
+        return 1;
+    }
+
+    int rows = PQntuples(res);
+    if (rows == 0) {
+        fprintf(stderr, "[CHECK] no config found%s\n", (only_id >= 0) ? " for requested id" : "");
+        PQclear(res);
+        PQfinish(conn);
+        return 1;
+    }
+
+    fprintf(stdout, "[CHECK] Config summary:\n");
+    for (int i = 0; i < rows; i++) {
+        fprintf(stdout,
+                "  id=%s profiles=%s locals=%s wans=%s traffic_rules=%s policies=%s\n",
+                PQgetvalue(res, i, 0), PQgetvalue(res, i, 1), PQgetvalue(res, i, 2),
+                PQgetvalue(res, i, 3), PQgetvalue(res, i, 4), PQgetvalue(res, i, 5));
+    }
+    PQclear(res);
+
+    snprintf(sql, sizeof(sql),
+             "SELECT cp.id, COUNT(*) "
+             "FROM xdp_profile_crypto_policies cp "
+             "JOIN xdp_profiles p ON p.id = cp.profile_id "
+             "JOIN xdp_configs c ON c.id = p.config_id "
+             "%s "
+             "GROUP BY cp.id HAVING COUNT(*) > 1 ORDER BY cp.id;",
+             where_buf);
+    res = PQexec(conn, sql);
+    if (PQresultStatus(res) != PGRES_TUPLES_OK) {
+        fprintf(stderr, "[CHECK] duplicate policy-id query failed: %s", PQresultErrorMessage(res));
+        PQclear(res);
+        PQfinish(conn);
+        return 1;
+    }
+    if (PQntuples(res) > 0) {
+        fprintf(stdout, "[CHECK][WARN] duplicated policy IDs detected:\n");
+        for (int i = 0; i < PQntuples(res); i++)
+            fprintf(stdout, "  policy_id=%s count=%s\n", PQgetvalue(res, i, 0), PQgetvalue(res, i, 1));
+    } else {
+        fprintf(stdout, "[CHECK] policy-id uniqueness: OK\n");
+    }
+    PQclear(res);
+
+    snprintf(sql, sizeof(sql),
+             "SELECT cp.id, cp.aes_bits, cp.nonce_size "
+             "FROM xdp_profile_crypto_policies cp "
+             "JOIN xdp_profiles p ON p.id = cp.profile_id "
+             "JOIN xdp_configs c ON c.id = p.config_id "
+             "%s%s "
+             "(cp.aes_bits NOT IN (128,256) OR cp.nonce_size < 4 OR cp.nonce_size > 16) "
+             "ORDER BY cp.id;",
+             where_buf,
+             (where_buf[0] == '\0') ? "WHERE " : " AND ");
+    res = PQexec(conn, sql);
+    if (PQresultStatus(res) != PGRES_TUPLES_OK) {
+        fprintf(stderr, "[CHECK] policy-params query failed: %s", PQresultErrorMessage(res));
+        PQclear(res);
+        PQfinish(conn);
+        return 1;
+    }
+    if (PQntuples(res) > 0) {
+        fprintf(stdout, "[CHECK][WARN] invalid policy params detected:\n");
+        for (int i = 0; i < PQntuples(res); i++)
+            fprintf(stdout, "  policy_id=%s aes_bits=%s nonce_size=%s\n",
+                    PQgetvalue(res, i, 0), PQgetvalue(res, i, 1), PQgetvalue(res, i, 2));
+    } else {
+        fprintf(stdout, "[CHECK] policy params (aes_bits/nonce_size): OK\n");
+    }
+    PQclear(res);
+    PQfinish(conn);
     return 0;
 }
 
@@ -345,6 +456,8 @@ int main(int argc, char **argv) {
     }
 
     int config_id = -1;
+    int check_mode = 0;
+    int check_id = -1;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-id") == 0 && i + 1 < argc) {
             if (parse_config_id_arg(argv[++i], &config_id) != 0) {
@@ -352,7 +465,25 @@ int main(int argc, char **argv) {
                 usage(argv[0]);
                 return 1;
             }
+        } else if (strcmp(argv[i], "-check") == 0) {
+            check_mode = 1;
+            if (i + 1 < argc && argv[i + 1][0] != '-') {
+                if (parse_config_id_arg(argv[++i], &check_id) != 0) {
+                    fprintf(stderr, "[FATAL] check id must be a number (digits only)\n");
+                    usage(argv[0]);
+                    return 1;
+                }
+            }
         }
+    }
+
+    if (check_mode) {
+        if (!db_pass || !*db_pass) {
+            fprintf(stderr,
+                    "[FATAL] Missing DB credentials. Set DB_PASS or PGPASSWORD (or provide /opt/db.env).\n");
+            return 1;
+        }
+        return run_db_check(keywords, values, check_id);
     }
 
     if (config_id >= 0) {

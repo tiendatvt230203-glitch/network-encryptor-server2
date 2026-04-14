@@ -98,3 +98,48 @@ CREATE INDEX IF NOT EXISTS idx_profile_locals_profile_id ON xdp_profile_locals(p
 CREATE INDEX IF NOT EXISTS idx_profile_wans_profile_id ON xdp_profile_wans(profile_id);
 CREATE INDEX IF NOT EXISTS idx_profile_rules_profile_id ON xdp_profile_traffic_rules(profile_id);
 CREATE INDEX IF NOT EXISTS idx_profile_policies_profile_id ON xdp_profile_crypto_policies(profile_id);
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'xdp_profiles_config_name_uniq'
+    ) THEN
+        ALTER TABLE xdp_profiles
+            ADD CONSTRAINT xdp_profiles_config_name_uniq UNIQUE (config_id, profile_name);
+    END IF;
+END $$;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'xdp_profile_locals_uniq'
+    ) THEN
+        ALTER TABLE xdp_profile_locals
+            ADD CONSTRAINT xdp_profile_locals_uniq UNIQUE (profile_id, ifname);
+    END IF;
+END $$;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'xdp_profile_wans_uniq'
+    ) THEN
+        ALTER TABLE xdp_profile_wans
+            ADD CONSTRAINT xdp_profile_wans_uniq UNIQUE (profile_id, ifname);
+    END IF;
+END $$;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'xdp_profile_wans_weight_chk'
+    ) THEN
+        ALTER TABLE xdp_profile_wans
+            ADD CONSTRAINT xdp_profile_wans_weight_chk
+            CHECK (bandwidth_weight_percent >= 0 AND bandwidth_weight_percent <= 100);
+    END IF;
+END $$;

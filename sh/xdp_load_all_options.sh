@@ -3,6 +3,7 @@
 set -euo pipefail
 
 SQL_DIR="sql_options"
+LOAD_ONE_SCRIPT="sh/xdp_load_option.sh"
 
 if [ -f "/opt/db.env" ]; then
   . "/opt/db.env"
@@ -40,10 +41,32 @@ if [ "${#SQL_FILES[@]}" -eq 0 ]; then
   exit 1
 fi
 
+if [ ! -x "${LOAD_ONE_SCRIPT}" ]; then
+  echo "[FATAL] Script not executable: ${LOAD_ONE_SCRIPT}" >&2
+  echo "Run: chmod +x ${LOAD_ONE_SCRIPT}" >&2
+  exit 1
+fi
+
+declare -A IDS=()
 for sql_file in "${SQL_FILES[@]}"; do
-  echo ">>> Import ${sql_file}"
-  psql -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -d "${DB_NAME}" -f "${sql_file}"
+  base="$(basename "${sql_file}")"
+  if [[ "${base}" =~ ^([0-9]+)_.*\.sql$ ]]; then
+    id="${BASH_REMATCH[1]}"
+    id=$((10#${id}))
+    IDS["${id}"]=1
+  fi
+done
+
+if [ "${#IDS[@]}" -eq 0 ]; then
+  echo "[FATAL] No option files matched pattern <id>_*.sql in ${SQL_DIR}" >&2
+  exit 1
+fi
+
+mapfile -t SORTED_IDS < <(printf '%s\n' "${!IDS[@]}" | sort -n)
+for id in "${SORTED_IDS[@]}"; do
+  echo ">>> Load option id=${id}"
+  "${LOAD_ONE_SCRIPT}" "${id}"
 done
 
 echo
-echo "Hoàn tất import tất cả file SQL trong ${SQL_DIR}."
+echo "Hoàn tất load tất cả option IDs: ${SORTED_IDS[*]}"
