@@ -43,6 +43,9 @@ static struct flow_table g_flow_table;
 
 static struct packet_crypto_ctx g_policy_crypto_ctx[MAX_CRYPTO_POLICIES];
 static int g_policy_crypto_ctx_ready[MAX_CRYPTO_POLICIES];
+static uint64_t g_profile_hits[MAX_PROFILES];
+static uint64_t g_profile_miss_hits;
+static uint64_t g_profile_log_seq;
 
 
 static struct app_config *g_cfg_ptr = NULL;
@@ -1107,6 +1110,14 @@ static void *worker_thread(void *arg) {
 
         int flow_ok = (parse_flow(job.pkt_ptr, job.pkt_len,
                                   &src_ip, &dst_ip, &src_port, &dst_port, &protocol) == 0);
+        int profile_idx = -1;
+        if (flow_ok && fwd->cfg) {
+            profile_idx = config_select_profile_for_flow(fwd->cfg, src_ip, dst_ip);
+            if (profile_idx >= 0 && profile_idx < MAX_PROFILES)
+                __sync_fetch_and_add(&g_profile_hits[profile_idx], 1);
+            else
+                __sync_fetch_and_add(&g_profile_miss_hits, 1);
+        }
 
         int wan_idx;
         if (flow_ok) {
@@ -1119,6 +1130,19 @@ static void *worker_thread(void *arg) {
 
         if (wan_idx < 0 || wan_idx >= fwd->wan_count) {
             wan_idx = 0;
+        }
+
+        uint64_t seq = __sync_add_and_fetch(&g_profile_log_seq, 1);
+        if ((seq % 20000ULL) == 0 && fwd->cfg) {
+            fprintf(stderr, "[PROFILE HIT] total=%llu miss=%llu",
+                    (unsigned long long)seq,
+                    (unsigned long long)g_profile_miss_hits);
+            for (int pi = 0; pi < fwd->cfg->profile_count; pi++) {
+                fprintf(stderr, " p%d(%s)=%llu",
+                        pi, fwd->cfg->profiles[pi].name,
+                        (unsigned long long)g_profile_hits[pi]);
+            }
+            fprintf(stderr, " last_sel=%d last_wan=%d\n", profile_idx, wan_idx);
         }
 
         struct xsk_interface *wan = &fwd->wans[wan_idx];
@@ -1355,6 +1379,9 @@ int forwarder_init(struct forwarder *fwd, struct app_config *cfg) {
             g_arp_inited = 1;
             fprintf(stderr, "[ARP] ready on %s (ip=%u)\n",
                     g_arp[i].ifname, (unsigned)ntohl(g_arp[i].if_ip));
+        } else {
+            fprintf(stderr, "[ARP] WARN: cannot init local ARP on %s\n",
+                    fwd->locals[i].ifname);
         }
     }
 
