@@ -1,13 +1,13 @@
-#include "../inc/forwarder.h"
-#include "../inc/packet_crypto.h"
-#include "../inc/flow_table.h"
-#include "../inc/config.h"
-#include "../inc/crypto_layer2.h"
-#include "../inc/crypto_layer3.h"
-#include "../inc/crypto_layer4.h"
-#include "../inc/wan_arp.h"
-#include "../inc/crypto_policy_utils.h"
-#include "../inc/crypto_dispatch.h"
+#include "../../inc/forwarder.h"
+#include "../../inc/packet_crypto.h"
+#include "../../inc/flow_table.h"
+#include "../../inc/config.h"
+#include "../../inc/crypto_layer2.h"
+#include "../../inc/crypto_layer3.h"
+#include "../../inc/crypto_layer4.h"
+#include "../../inc/wan_arp.h"
+#include "../../inc/crypto_policy_utils.h"
+#include "../../inc/crypto_dispatch.h"
 #include <signal.h>
 #include <poll.h>
 #include <pthread.h>
@@ -261,10 +261,12 @@ static void compute_profile_weighted_wan_windows(const struct app_config *cfg,
     if (!cfg || !out_wan_window_sizes || max_wans <= 0)
         return;
 
+
     const uint32_t base_kb = WAN_REORDER_WINDOW_KB;
     const uint32_t base_bytes = base_kb * 1024U;
 
-    const uint32_t min_kb = 512;
+
+    const uint32_t min_kb = 512; 
     const uint32_t min_bytes = min_kb * 1024U;
 
     for (int pi = 0; pi < cfg->profile_count; pi++) {
@@ -279,7 +281,7 @@ static void compute_profile_weighted_wan_windows(const struct app_config *cfg,
                 sumw += w;
         }
         if (sumw <= 0)
-            continue;
+            continue; 
 
         for (int i = 0; i < p->wan_count; i++) {
             int wan_idx = p->wan_indices[i];
@@ -442,46 +444,6 @@ static void pin_thread_to_core(int core_id) {
     (void)pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
 }
 
-static int encrypt_packet(void *pkt_data, uint32_t *pkt_len) {
-    if (!crypto_enabled) return 0;
-
-    if (g_cfg_ptr) {
-        packet_crypto_set_mode(g_cfg_ptr->crypto_mode);
-        packet_crypto_set_aes_bits(g_cfg_ptr->aes_bits);
-        packet_crypto_set_nonce_size(g_cfg_ptr->nonce_size);
-        if (g_cfg_ptr->encrypt_layer == 3)
-            packet_crypto_set_fake_protocol((uint8_t)(g_cfg_ptr->fake_protocol & 0xFF));
-        packet_crypto_set_policy_id(0);
-    }
-
-    int new_len = packet_encrypt(&crypto_ctx, (uint8_t *)pkt_data, *pkt_len);
-    if (new_len < 0) {
-        return -1;
-    }
-    *pkt_len = (uint32_t)new_len;
-    return 0;
-}
-
-static int decrypt_packet(void *pkt_data, uint32_t *pkt_len) {
-    if (!crypto_enabled) return 0;
-
-    if (g_cfg_ptr) {
-        packet_crypto_set_mode(g_cfg_ptr->crypto_mode);
-        packet_crypto_set_aes_bits(g_cfg_ptr->aes_bits);
-        packet_crypto_set_nonce_size(g_cfg_ptr->nonce_size);
-        if (g_cfg_ptr->encrypt_layer == 3)
-            packet_crypto_set_fake_protocol((uint8_t)(g_cfg_ptr->fake_protocol & 0xFF));
-        packet_crypto_set_policy_id(0);
-    }
-
-    int new_len = packet_decrypt(&crypto_ctx, (uint8_t *)pkt_data, *pkt_len);
-    if (new_len < 0) {
-        return -1;
-    }
-    *pkt_len = (uint32_t)new_len;
-    return 0;
-}
-
 static int decrypt_packet_auto_l2(struct forwarder *fwd,
                                   uint8_t *pkt, uint32_t *pkt_len,
                                   uint8_t *scratch, size_t scratch_sz) {
@@ -535,15 +497,6 @@ static int decrypt_packet_auto_l2(struct forwarder *fwd,
     return -1;
 }
 
-
-static int l4_extract_policy_id_ipv4(uint8_t *pkt, uint32_t pkt_len,
-                                       uint8_t *policy_id_out, int *nonce_size_out) {
-    if (!pkt || !policy_id_out || !nonce_size_out)
-        return -1;
-
-
-    return crypto_l4_extract_policy_id_ipv4(pkt, pkt_len, policy_id_out, nonce_size_out);
-}
 
 static int l3_extract_policy_id(uint8_t *pkt, uint32_t pkt_len,
                                 uint8_t *policy_id_out) {
@@ -1309,8 +1262,6 @@ static void *worker_thread(void *arg) {
     pin_thread_to_core(args->core_id);
 
     struct worker_ring *ring = &g_worker_rings[worker_id];
-    uint8_t frag1_buf[2048];
-    uint8_t frag2_buf[2048];
 
     while (running) {
         struct packet_job job;

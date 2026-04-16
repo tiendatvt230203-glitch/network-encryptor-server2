@@ -1,4 +1,4 @@
-#include "../inc/interface.h"
+#include "../../inc/interface.h"
 #include <poll.h>
 #include <sched.h>
 #include <net/ethernet.h>
@@ -186,6 +186,7 @@ int interface_init_local(struct xsk_interface *iface,
     memset(iface, 0, sizeof(*iface));
     iface->ifindex = if_nametoindex(local_cfg->ifname);
     strncpy(iface->ifname, local_cfg->ifname, IF_NAMESIZE - 1);
+    iface->ifname[IF_NAMESIZE - 1] = '\0';
     memcpy(iface->src_mac, local_cfg->src_mac, MAC_LEN);
     memcpy(iface->dst_mac, local_cfg->dst_mac, MAC_LEN);
 
@@ -354,11 +355,12 @@ err_queues:
 int interface_init_wan(struct xsk_interface *iface,
                        const struct wan_config *wan_cfg) {
     int ret;
-    uint32_t idx;
+    uint32_t idx = 0;
 
     memset(iface, 0, sizeof(*iface));
     iface->ifindex = if_nametoindex(wan_cfg->ifname);
     strncpy(iface->ifname, wan_cfg->ifname, IF_NAMESIZE - 1);
+    iface->ifname[IF_NAMESIZE - 1] = '\0';
     memcpy(iface->src_mac, wan_cfg->src_mac, MAC_LEN);
     memcpy(iface->dst_mac, wan_cfg->dst_mac, MAC_LEN);
 
@@ -406,6 +408,14 @@ int interface_init_wan(struct xsk_interface *iface,
     }
 
     ret = xsk_ring_prod__reserve(&iface->fill, wan_cfg->ring_size, &idx);
+    if (ret != (int)wan_cfg->ring_size) {
+        fprintf(stderr, "xsk_ring_prod__reserve WAN fill failed: ret=%d expected=%u\n",
+                ret, wan_cfg->ring_size);
+        xsk_socket__delete(iface->xsk);
+        xsk_umem__delete(iface->umem);
+        free(iface->bufs);
+        return -1;
+    }
     for (uint32_t i = 0; i < wan_cfg->ring_size; i++)
         *xsk_ring_prod__fill_addr(&iface->fill, idx++) = i * wan_cfg->frame_size;
     xsk_ring_prod__submit(&iface->fill, wan_cfg->ring_size);
@@ -429,6 +439,7 @@ int interface_init_wan_rx(struct xsk_interface *iface,
     memset(iface, 0, sizeof(*iface));
     iface->ifindex = if_nametoindex(wan_cfg->ifname);
     strncpy(iface->ifname, wan_cfg->ifname, IF_NAMESIZE - 1);
+    iface->ifname[IF_NAMESIZE - 1] = '\0';
     memcpy(iface->src_mac, wan_cfg->src_mac, MAC_LEN);
     memcpy(iface->dst_mac, wan_cfg->dst_mac, MAC_LEN);
 

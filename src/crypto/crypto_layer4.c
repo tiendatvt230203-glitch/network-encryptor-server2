@@ -1,6 +1,6 @@
-#include "../inc/crypto_layer4.h"
-#include "../inc/config.h"
-#include "../inc/fragment.h"
+#include "../../inc/crypto_layer4.h"
+#include "../../inc/config.h"
+#include "../../inc/fragment.h"
 #include <string.h>
 
 #define L4_TUNNEL_MAGIC    0xA5

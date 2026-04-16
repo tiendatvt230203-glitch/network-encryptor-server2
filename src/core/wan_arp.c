@@ -1,4 +1,4 @@
-#include "../inc/wan_arp.h"
+#include "../../inc/wan_arp.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -34,7 +34,7 @@ static int get_iface_mac_and_ip(const char *ifname, uint8_t mac_out[6], uint32_t
 
     struct ifreq ifr;
     memset(&ifr, 0, sizeof(ifr));
-    strncpy(ifr.ifr_name, ifname, IF_NAMESIZE - 1);
+    (void)snprintf(ifr.ifr_name, IF_NAMESIZE, "%s", ifname);
 
     if (ioctl(fd, SIOCGIFHWADDR, &ifr) != 0) {
         close(fd);
@@ -227,6 +227,7 @@ int arp_init_for_local(struct arp_cache *c,
     c->raw_fd = -1;
     c->ifindex = local_iface->ifindex;
     strncpy(c->ifname, local_iface->ifname, IF_NAMESIZE - 1);
+    c->ifname[IF_NAMESIZE - 1] = '\0';
     c->running_flag = running_flag;
 
     if (get_iface_mac_and_ip(c->ifname, c->if_mac, &c->if_ip) != 0) {

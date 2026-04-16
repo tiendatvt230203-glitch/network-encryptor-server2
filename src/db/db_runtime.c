@@ -1,6 +1,6 @@
-#include "../inc/db_runtime.h"
+#include "../../inc/db_runtime.h"
 
-#include "../inc/db_config.h"
+#include "../../inc/db_config.h"
 
 #include <libpq-fe.h>
 #include <stdio.h>

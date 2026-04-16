@@ -1,5 +1,5 @@
 #define _POSIX_C_SOURCE 199309L
-#include "../inc/flow_table.h"
+#include "../../inc/flow_table.h"
 #include <arpa/inet.h>
 #include <stdlib.h>
 #include <string.h>
@@ -59,17 +59,6 @@ static uint32_t flow_hash_ips(uint32_t src_ip, uint32_t dst_ip) {
     hash *= 0xc2b2ae35;
     hash ^= (hash >> 16);
     return hash % FLOW_TABLE_SIZE;
-}
-
-static uint32_t flow_mix_5tuple(uint32_t src_ip, uint32_t dst_ip,
-                                 uint16_t src_port, uint16_t dst_port, uint8_t protocol) {
-    uint32_t h = src_ip ^ dst_ip ^ ((uint32_t)src_port << 16) ^ (uint32_t)dst_port ^ (uint32_t)protocol;
-    h ^= h >> 16;
-    h *= 0x7feb352dU;
-    h ^= h >> 15;
-    h *= 0x846ca68bU;
-    h ^= h >> 16;
-    return h;
 }
 
 static uint64_t get_time_sec(void) {

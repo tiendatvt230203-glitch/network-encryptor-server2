@@ -1,4 +1,4 @@
-#include "../inc/db_config.h"
+#include "../../inc/db_config.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

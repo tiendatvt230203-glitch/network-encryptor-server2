@@ -1,5 +1,5 @@
-#include "../inc/crypto_layer2.h"
-#include "../inc/config.h"
+#include "../../inc/crypto_layer2.h"
+#include "../../inc/config.h"
 #include <string.h>
 #include <stdio.h>
 

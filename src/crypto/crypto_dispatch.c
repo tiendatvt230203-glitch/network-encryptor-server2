@@ -1,7 +1,7 @@
-#include "../inc/crypto_dispatch.h"
+#include "../../inc/crypto_dispatch.h"
 
-#include "../inc/crypto_policy_utils.h"
-#include "../inc/crypto_layer4.h"
+#include "../../inc/crypto_policy_utils.h"
+#include "../../inc/crypto_layer4.h"
 
 #include <string.h>
 #include <unistd.h>

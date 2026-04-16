@@ -1,6 +1,6 @@
-#include "../inc/crypto_policy_utils.h"
+#include "../../inc/crypto_policy_utils.h"
 
-#include "../inc/packet_crypto.h"
+#include "../../inc/packet_crypto.h"
 
 #include <stddef.h>
 
