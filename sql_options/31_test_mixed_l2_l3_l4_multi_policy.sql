@@ -481,7 +481,7 @@ INSERT INTO xdp_profile_crypto_policies (
     crypto_mode, aes_bits, nonce_size, crypto_key
 )
 SELECT
-    230, p.id, 40, 'encrypt_l3', 'UDP',
+    171, p.id, 40, 'encrypt_l3', 'UDP',
     '192.168.10.20/32', 'Any', '192.168.180.20/32', '6005',
     'gcm', 128, 12, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
 FROM xdp_profiles p
@@ -493,7 +493,7 @@ INSERT INTO xdp_profile_crypto_policies (
     crypto_mode, aes_bits, nonce_size, crypto_key
 )
 SELECT
-    231, p.id, 120, 'encrypt_l3', 'UDP',
+    172, p.id, 120, 'encrypt_l3', 'UDP',
     '192.168.10.0/24', 'Any', '192.168.180.0/24', '6005',
     'gcm', 128, 12, 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
 FROM xdp_profiles p
@@ -505,7 +505,7 @@ INSERT INTO xdp_profile_crypto_policies (
     crypto_mode, aes_bits, nonce_size, crypto_key
 )
 SELECT
-    232, p.id, 88, 'encrypt_l3', 'UDP',
+    173, p.id, 88, 'encrypt_l3', 'UDP',
     '192.168.10.0/24', 'Any', '192.168.180.0/24', '6006',
     'gcm', 128, 12, 'cccccccccccccccccccccccccccccccc'
 FROM xdp_profiles p
@@ -517,7 +517,7 @@ INSERT INTO xdp_profile_crypto_policies (
     crypto_mode, aes_bits, nonce_size, crypto_key
 )
 SELECT
-    233, p.id, 88, 'encrypt_l3', 'UDP',
+    174, p.id, 88, 'encrypt_l3', 'UDP',
     '192.168.10.0/24', 'Any', '192.168.180.0/24', '6006',
     'gcm', 128, 12, 'dddddddddddddddddddddddddddddddd'
 FROM xdp_profiles p
@@ -529,7 +529,7 @@ INSERT INTO xdp_profile_crypto_policies (
     crypto_mode, aes_bits, nonce_size, crypto_key
 )
 SELECT
-    234, p.id, 10, 'encrypt_l3', 'ANY',
+    175, p.id, 10, 'encrypt_l3', 'ANY',
     '192.168.10.0/24', 'Any', '192.168.180.0/24', '6007',
     'gcm', 128, 12, 'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee'
 FROM xdp_profiles p
@@ -541,7 +541,7 @@ INSERT INTO xdp_profile_crypto_policies (
     crypto_mode, aes_bits, nonce_size, crypto_key
 )
 SELECT
-    235, p.id, 200, 'encrypt_l3', 'UDP',
+    176, p.id, 200, 'encrypt_l3', 'UDP',
     '192.168.10.0/24', 'Any', '192.168.180.0/24', '6007',
     'gcm', 128, 12, 'ffffffffffffffffffffffffffffffff'
 FROM xdp_profiles p
@@ -553,7 +553,7 @@ INSERT INTO xdp_profile_crypto_policies (
     crypto_mode, aes_bits, nonce_size, crypto_key
 )
 SELECT
-    236, p.id, 15, 'bypass', 'UDP',
+    177, p.id, 15, 'bypass', 'UDP',
     '192.168.10.40/32', 'Any', '192.168.180.40/32', '6009',
     'gcm', 128, 12, NULL
 FROM xdp_profiles p
@@ -565,7 +565,7 @@ INSERT INTO xdp_profile_crypto_policies (
     crypto_mode, aes_bits, nonce_size, crypto_key
 )
 SELECT
-    237, p.id, 45, 'encrypt_l3', 'UDP',
+    178, p.id, 45, 'encrypt_l3', 'UDP',
     '192.168.10.0/24', 'Any', '192.168.180.0/24', '6009',
     'gcm', 128, 12, '0123456789abcdef0123456789abcdef'
 FROM xdp_profiles p
