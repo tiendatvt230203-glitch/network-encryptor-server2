@@ -282,8 +282,9 @@ static int load_profiles_and_policies(struct app_config *cfg, PGconn *conn, int 
         PQclear(res);
 
         res = PQexecParams(conn,
-            "SELECT id, priority, action, protocol, src_cidr, src_port, dst_cidr, dst_port, "
-            "       crypto_mode, aes_bits, nonce_size, crypto_key "
+            "SELECT id, priority, action, protocol, "
+            "       crypto_mode, aes_bits, nonce_size, crypto_key, "
+            "       src_cidr, src_port, dst_cidr, dst_port "
             "FROM xdp_profile_crypto_policies WHERE profile_id = $1 "
             "ORDER BY priority ASC, id ASC",
             1, NULL, pp, NULL, NULL, 0);
@@ -313,24 +314,14 @@ static int load_profiles_and_policies(struct app_config *cfg, PGconn *conn, int 
                 cp_base.action = parse_action_name(PQgetvalue(res, r, 2));
                 cp_base.protocol = parse_protocol_name(PQgetvalue(res, r, 3));
 
-                const char *src_cidr = PQgetvalue(res, r, 4);
-                const char *src_port = PQgetvalue(res, r, 5);
-                const char *dst_cidr = PQgetvalue(res, r, 6);
-                const char *dst_port = PQgetvalue(res, r, 7);
-                const char *mode = PQgetvalue(res, r, 8);
-                const char *bits = PQgetvalue(res, r, 9);
-                const char *nonce = PQgetvalue(res, r, 10);
-                const char *key_hex = PQgetvalue(res, r, 11);
-
-
-                if (parse_port_range(src_port, &cp_base.src_port_from, &cp_base.src_port_to) != 0) {
-                    cp_base.src_port_from = -1;
-                    cp_base.src_port_to = -1;
-                }
-                if (parse_port_range(dst_port, &cp_base.dst_port_from, &cp_base.dst_port_to) != 0) {
-                    cp_base.dst_port_from = -1;
-                    cp_base.dst_port_to = -1;
-                }
+                const char *mode = PQgetvalue(res, r, 4);
+                const char *bits = PQgetvalue(res, r, 5);
+                const char *nonce = PQgetvalue(res, r, 6);
+                const char *key_hex = PQgetvalue(res, r, 7);
+                const char *legacy_src_cidr = PQgetvalue(res, r, 8);
+                const char *legacy_src_port = PQgetvalue(res, r, 9);
+                const char *legacy_dst_cidr = PQgetvalue(res, r, 10);
+                const char *legacy_dst_port = PQgetvalue(res, r, 11);
 
                 cp_base.crypto_mode = (mode && (strcasecmp(mode, "gcm") == 0)) ? CRYPTO_MODE_GCM : CRYPTO_MODE_CTR;
                 cp_base.aes_bits = bits ? atoi(bits) : 128;
@@ -357,52 +348,95 @@ static int load_profiles_and_policies(struct app_config *cfg, PGconn *conn, int 
                     }
                 }
 
-                char src_items[MAX_CIDR_LIST_ITEMS][MAX_CIDR_ITEM_LEN];
-                char dst_items[MAX_CIDR_LIST_ITEMS][MAX_CIDR_ITEM_LEN];
-                int src_n = split_cidr_list(src_cidr, src_items, MAX_CIDR_LIST_ITEMS);
-                int dst_n = split_cidr_list(dst_cidr, dst_items, MAX_CIDR_LIST_ITEMS);
-                if (src_n <= 0 || dst_n <= 0) {
+                char policy_id_str[32];
+                snprintf(policy_id_str, sizeof(policy_id_str), "%d", db_policy_id);
+                const char *pm[1] = { policy_id_str };
+                PGresult *mres = PQexecParams(conn,
+                    "SELECT src_cidr, src_port, dst_cidr, dst_port "
+                    "FROM xdp_profile_crypto_policy_matches WHERE policy_id = $1 ORDER BY id",
+                    1, NULL, pm, NULL, NULL, 0);
+
+                int use_match_table = 0;
+                int match_rows = 0;
+                if (PQresultStatus(mres) == PGRES_TUPLES_OK) {
+                    match_rows = PQntuples(mres);
+                    use_match_table = (match_rows > 0);
+                } else {
                     fprintf(stderr,
-                            "[DB CRYPTO] policy id=%d has invalid CIDR list src_cidr=%s dst_cidr=%s\n",
-                            cp_base.id,
-                            src_cidr ? src_cidr : "(null)",
-                            dst_cidr ? dst_cidr : "(null)");
-                    PQclear(res);
-                    return -1;
+                            "[DB CRYPTO][WARN] policy id=%d failed to read xdp_profile_crypto_policy_matches; using legacy columns\n",
+                            cp_base.id);
                 }
+                if (match_rows <= 0)
+                    match_rows = 1;
 
-                for (int si = 0; si < src_n; si++) {
-                    for (int di = 0; di < dst_n; di++) {
-                        if (cfg->policy_count >= MAX_CRYPTO_POLICIES || p->policy_count >= MAX_CRYPTO_POLICIES) {
-                            fprintf(stderr,
-                                    "[DB CRYPTO] policy expansion overflow for policy id=%d (MAX_CRYPTO_POLICIES=%d)\n",
-                                    cp_base.id, MAX_CRYPTO_POLICIES);
-                            PQclear(res);
-                            return -1;
+                for (int mr = 0; mr < match_rows; mr++) {
+                    const char *src_cidr = use_match_table ? PQgetvalue(mres, mr, 0) : legacy_src_cidr;
+                    const char *src_port = use_match_table ? PQgetvalue(mres, mr, 1) : legacy_src_port;
+                    const char *dst_cidr = use_match_table ? PQgetvalue(mres, mr, 2) : legacy_dst_cidr;
+                    const char *dst_port = use_match_table ? PQgetvalue(mres, mr, 3) : legacy_dst_port;
+
+                    struct crypto_policy cp_match = cp_base;
+                    if (parse_port_range(src_port, &cp_match.src_port_from, &cp_match.src_port_to) != 0) {
+                        cp_match.src_port_from = -1;
+                        cp_match.src_port_to = -1;
+                    }
+                    if (parse_port_range(dst_port, &cp_match.dst_port_from, &cp_match.dst_port_to) != 0) {
+                        cp_match.dst_port_from = -1;
+                        cp_match.dst_port_to = -1;
+                    }
+
+                    char src_items[MAX_CIDR_LIST_ITEMS][MAX_CIDR_ITEM_LEN];
+                    char dst_items[MAX_CIDR_LIST_ITEMS][MAX_CIDR_ITEM_LEN];
+                    int src_n = split_cidr_list(src_cidr, src_items, MAX_CIDR_LIST_ITEMS);
+                    int dst_n = split_cidr_list(dst_cidr, dst_items, MAX_CIDR_LIST_ITEMS);
+                    if (src_n <= 0 || dst_n <= 0) {
+                        fprintf(stderr,
+                                "[DB CRYPTO] policy id=%d has invalid CIDR list src_cidr=%s dst_cidr=%s\n",
+                                cp_base.id,
+                                src_cidr ? src_cidr : "(null)",
+                                dst_cidr ? dst_cidr : "(null)");
+                        PQclear(mres);
+                        PQclear(res);
+                        return -1;
+                    }
+
+                    for (int si = 0; si < src_n; si++) {
+                        for (int di = 0; di < dst_n; di++) {
+                            if (cfg->policy_count >= MAX_CRYPTO_POLICIES || p->policy_count >= MAX_CRYPTO_POLICIES) {
+                                fprintf(stderr,
+                                        "[DB CRYPTO] policy expansion overflow for policy id=%d (MAX_CRYPTO_POLICIES=%d)\n",
+                                        cp_base.id, MAX_CRYPTO_POLICIES);
+                                PQclear(mres);
+                                PQclear(res);
+                                return -1;
+                            }
+
+                            struct crypto_policy *cp = &cfg->policies[cfg->policy_count];
+                            *cp = cp_match;
+
+                            if (parse_cidr_any_or_negated(src_items[si], &cp->src_any, &cp->src_negate,
+                                                          &cp->src_net, &cp->src_mask) != 0) {
+                                fprintf(stderr, "[DB CRYPTO] policy id=%d has invalid src_cidr item=%s\n",
+                                        cp->id, src_items[si]);
+                                PQclear(mres);
+                                PQclear(res);
+                                return -1;
+                            }
+                            if (parse_cidr_any_or_negated(dst_items[di], &cp->dst_any, &cp->dst_negate,
+                                                          &cp->dst_net, &cp->dst_mask) != 0) {
+                                fprintf(stderr, "[DB CRYPTO] policy id=%d has invalid dst_cidr item=%s\n",
+                                        cp->id, dst_items[di]);
+                                PQclear(mres);
+                                PQclear(res);
+                                return -1;
+                            }
+
+                            p->policy_indices[p->policy_count++] = cfg->policy_count;
+                            cfg->policy_count++;
                         }
-
-                        struct crypto_policy *cp = &cfg->policies[cfg->policy_count];
-                        *cp = cp_base;
-
-                        if (parse_cidr_any_or_negated(src_items[si], &cp->src_any, &cp->src_negate,
-                                                      &cp->src_net, &cp->src_mask) != 0) {
-                            fprintf(stderr, "[DB CRYPTO] policy id=%d has invalid src_cidr item=%s\n",
-                                    cp->id, src_items[si]);
-                            PQclear(res);
-                            return -1;
-                        }
-                        if (parse_cidr_any_or_negated(dst_items[di], &cp->dst_any, &cp->dst_negate,
-                                                      &cp->dst_net, &cp->dst_mask) != 0) {
-                            fprintf(stderr, "[DB CRYPTO] policy id=%d has invalid dst_cidr item=%s\n",
-                                    cp->id, dst_items[di]);
-                            PQclear(res);
-                            return -1;
-                        }
-
-                        p->policy_indices[p->policy_count++] = cfg->policy_count;
-                        cfg->policy_count++;
                     }
                 }
+                PQclear(mres);
             }
         }
         PQclear(res);

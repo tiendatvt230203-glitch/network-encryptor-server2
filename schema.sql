@@ -99,6 +99,15 @@ CREATE TABLE IF NOT EXISTS xdp_profile_crypto_policies (
         CHECK (nonce_size >= 4 AND nonce_size <= 16)
 );
 
+CREATE TABLE IF NOT EXISTS xdp_profile_crypto_policy_matches (
+    id SERIAL PRIMARY KEY,
+    policy_id INT NOT NULL REFERENCES xdp_profile_crypto_policies(id) ON DELETE CASCADE,
+    src_cidr TEXT NOT NULL DEFAULT 'ANY',
+    src_port VARCHAR(32) NOT NULL DEFAULT 'ANY',
+    dst_cidr TEXT NOT NULL DEFAULT 'ANY',
+    dst_port VARCHAR(32) NOT NULL DEFAULT 'ANY'
+);
+
 CREATE TABLE IF NOT EXISTS xdp_key_slots (
     id SMALLINT NOT NULL,
     config_id INT NOT NULL REFERENCES xdp_configs(id) ON DELETE CASCADE,
@@ -114,6 +123,7 @@ CREATE INDEX IF NOT EXISTS idx_profile_locals_profile_id ON xdp_profile_locals(p
 CREATE INDEX IF NOT EXISTS idx_profile_wans_profile_id ON xdp_profile_wans(profile_id);
 CREATE INDEX IF NOT EXISTS idx_profile_rules_profile_id ON xdp_profile_traffic_rules(profile_id);
 CREATE INDEX IF NOT EXISTS idx_profile_policies_profile_id ON xdp_profile_crypto_policies(profile_id);
+CREATE INDEX IF NOT EXISTS idx_profile_policy_matches_policy_id ON xdp_profile_crypto_policy_matches(policy_id);
 
 DO $$
 BEGIN
