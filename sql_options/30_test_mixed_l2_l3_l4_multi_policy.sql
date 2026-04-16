@@ -56,27 +56,6 @@ SELECT p.id, '192.168.182.0/24', '192.168.9.0/24'
 FROM xdp_profiles p
 WHERE p.config_id = 30 AND p.profile_name = 'wan_enp6s0_single';
 
--- Normalize policy match tuples into child table (direction-2 schema)
-INSERT INTO xdp_profile_crypto_policy_matches (policy_id, src_cidr, src_port, dst_cidr, dst_port)
-SELECT cp.id, cp.src_cidr, cp.src_port, cp.dst_cidr, cp.dst_port
-FROM xdp_profile_crypto_policies cp
-JOIN xdp_profiles p ON p.id = cp.profile_id
-WHERE p.config_id = 30 AND p.profile_name = 'wan_enp6s0_single';
-
--- Extra match row for same policy ID (single policy -> multiple destinations)
-INSERT INTO xdp_profile_crypto_policy_matches (policy_id, src_cidr, src_port, dst_cidr, dst_port)
-SELECT cp.id, 'Any', 'Any', '10.1.1.0/24', 'Any'
-FROM xdp_profile_crypto_policies cp
-JOIN xdp_profiles p ON p.id = cp.profile_id
-WHERE p.config_id = 30 AND p.profile_name = 'wan_enp6s0_single' AND cp.id = 230;
-
--- Extra match row for same policy ID (single policy -> multiple sources)
-INSERT INTO xdp_profile_crypto_policy_matches (policy_id, src_cidr, src_port, dst_cidr, dst_port)
-SELECT cp.id, '10.2.2.0/24', 'Any', '192.168.182.40/32', '6009'
-FROM xdp_profile_crypto_policies cp
-JOIN xdp_profiles p ON p.id = cp.profile_id
-WHERE p.config_id = 30 AND p.profile_name = 'wan_enp6s0_single' AND cp.id = 236;
-
 INSERT INTO xdp_profile_crypto_policies (
     id,
     profile_id,
@@ -591,3 +570,24 @@ SELECT
     'gcm', 128, 12, '0123456789abcdef0123456789abcdef'
 FROM xdp_profiles p
 WHERE p.config_id = 30 AND p.profile_name = 'wan_enp6s0_single';
+
+-- Normalize policy match tuples into child table (direction-2 schema)
+INSERT INTO xdp_profile_crypto_policy_matches (policy_id, src_cidr, src_port, dst_cidr, dst_port)
+SELECT cp.id, cp.src_cidr, cp.src_port, cp.dst_cidr, cp.dst_port
+FROM xdp_profile_crypto_policies cp
+JOIN xdp_profiles p ON p.id = cp.profile_id
+WHERE p.config_id = 30 AND p.profile_name = 'wan_enp6s0_single';
+
+-- Extra match row for same policy ID (single policy -> multiple destinations)
+INSERT INTO xdp_profile_crypto_policy_matches (policy_id, src_cidr, src_port, dst_cidr, dst_port)
+SELECT cp.id, 'Any', 'Any', '10.1.1.0/24', 'Any'
+FROM xdp_profile_crypto_policies cp
+JOIN xdp_profiles p ON p.id = cp.profile_id
+WHERE p.config_id = 30 AND p.profile_name = 'wan_enp6s0_single' AND cp.id = 230;
+
+-- Extra match row for same policy ID (single policy -> multiple sources)
+INSERT INTO xdp_profile_crypto_policy_matches (policy_id, src_cidr, src_port, dst_cidr, dst_port)
+SELECT cp.id, '10.2.2.0/24', 'Any', '192.168.182.40/32', '6009'
+FROM xdp_profile_crypto_policies cp
+JOIN xdp_profiles p ON p.id = cp.profile_id
+WHERE p.config_id = 30 AND p.profile_name = 'wan_enp6s0_single' AND cp.id = 236;
