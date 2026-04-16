@@ -86,8 +86,9 @@ static void log_crypto_policies_human(struct app_config *cfg, int config_id) {
         for (int pi = 0; pi < cfg->policy_count && pi < MAX_CRYPTO_POLICIES; pi++) {
             const struct crypto_policy *cp = &cfg->policies[pi];
             fprintf(stderr,
-                    "  [orphan POL] id=%d %s %s proto=%s prio=%d\n",
+                    "  [orphan POL] wire_id=%d db_id=%d %s %s proto=%s prio=%d\n",
                     cp->id,
+                    cp->db_id,
                     policy_action_name(cp->action),
                     crypto_mode_str(cp->crypto_mode),
                     policy_proto_str(cp->protocol),
@@ -156,10 +157,11 @@ static void log_crypto_policies_human(struct app_config *cfg, int config_id) {
             policy_port_str(dp, sizeof(dp), cp->dst_port_from, cp->dst_port_to);
 
             fprintf(stderr,
-                    "    crypto_policy id=%d (row PK) priority=%d\n"
+                    "    crypto_policy db_id=%d wire_id=%d priority=%d\n"
                     "      layer/action: %s  |  match: protocol=%s  src_ip=%s  dst_ip=%s  src_port=%s  dst_port=%s\n"
-                    "      crypto: %s-%u  nonce=%d bytes  policy_embed_byte=0x%02x (id&0xFF on wire for L3/L4)\n"
+                    "      crypto: %s-%u  nonce=%d bytes  policy_embed_byte=0x%02x (wire_id on packet for L3/L4)\n"
                     "      key_prefix(hex)=%02x%02x%02x%02x (first 4 bytes)\n",
+                    cp->db_id,
                     cp->id,
                     cp->priority,
                     policy_action_name(cp->action),

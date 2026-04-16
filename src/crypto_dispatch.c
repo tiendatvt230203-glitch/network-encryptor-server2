@@ -8,6 +8,32 @@
 
 #define L4_TUNNEL_MAGIC    0xA5
 
+static int lookup_policy_index(const struct crypto_dispatch_ctx *dctx,
+                               const struct crypto_policy *policies,
+                               int policy_count,
+                               int (*index_by_action_id)[256],
+                               int action_layer,
+                               uint8_t policy_id) {
+    if (!policies || policy_count <= 0)
+        return -1;
+
+    if (dctx && index_by_action_id &&
+        action_layer >= 0 && action_layer <= POLICY_ACTION_ENCRYPT_L4) {
+        int pi = index_by_action_id[action_layer][policy_id];
+        if (pi >= 0 && pi < policy_count)
+            return pi;
+    }
+
+    for (int pi = 0; pi < policy_count && pi < MAX_CRYPTO_POLICIES; pi++) {
+        const struct crypto_policy *cp = &policies[pi];
+        if (!cp || cp->action != action_layer)
+            continue;
+        if ((uint8_t)cp->id == policy_id)
+            return pi;
+    }
+    return -1;
+}
+
 int crypto_l3_extract_policy_id(uint8_t *pkt, uint32_t pkt_len, uint8_t *policy_id_out) {
     if (!pkt || !policy_id_out || pkt_len < 14 + 20)
         return -1;
@@ -139,22 +165,34 @@ int crypto_decrypt_packet_auto_by_action(
         uint8_t policy_id = 0;
         if (crypto_l3_extract_policy_id(pkt, *pkt_len, &policy_id) != 0)
             return 0;
-
-        for (int pi = 0; pi < cfg->policy_count && pi < MAX_CRYPTO_POLICIES; pi++) {
-            const struct crypto_policy *cp = &cfg->policies[pi];
-            if (!cp || cp->action != POLICY_ACTION_ENCRYPT_L3)
-                continue;
-            if (!dctx->per_policy_ready || !dctx->per_policy_ready[pi])
-                continue;
-            if ((uint8_t)cp->id != policy_id)
-                continue;
-
+        int pi = lookup_policy_index(dctx,
+                                     dctx->policies, dctx->policy_count,
+                                     dctx->policy_index_by_action_id,
+                                     POLICY_ACTION_ENCRYPT_L3, policy_id);
+        if (pi >= 0 && dctx->per_policy_ready && dctx->per_policy_ready[pi]) {
+            const struct crypto_policy *cp = &dctx->policies[pi];
             crypto_apply_from_policy(cp);
             int new_len = packet_decrypt(&dctx->per_policy_ctx[pi], pkt, *pkt_len);
-            if (new_len < 0)
-                return -1;
-            *pkt_len = (uint32_t)new_len;
-            return 0;
+            if (new_len >= 0) {
+                *pkt_len = (uint32_t)new_len;
+                return 0;
+            }
+        }
+
+        if (dctx->prev_grace_active && dctx->prev_policies && dctx->prev_policy_count > 0) {
+            int ppi = lookup_policy_index(dctx,
+                                          dctx->prev_policies, dctx->prev_policy_count,
+                                          dctx->prev_policy_index_by_action_id,
+                                          POLICY_ACTION_ENCRYPT_L3, policy_id);
+            if (ppi >= 0 && dctx->prev_per_policy_ready && dctx->prev_per_policy_ready[ppi]) {
+                const struct crypto_policy *cp_prev = &dctx->prev_policies[ppi];
+                crypto_apply_from_policy(cp_prev);
+                int new_len = packet_decrypt(&dctx->prev_per_policy_ctx[ppi], pkt, *pkt_len);
+                if (new_len >= 0) {
+                    *pkt_len = (uint32_t)new_len;
+                    return 0;
+                }
+            }
         }
         return -1;
     }
@@ -186,54 +224,43 @@ int crypto_decrypt_packet_auto_by_action(
         }
 
 
-        for (int pi = 0; pi < cfg->policy_count && pi < MAX_CRYPTO_POLICIES; pi++) {
-            const struct crypto_policy *cp = &cfg->policies[pi];
-            if (!cp || cp->action != POLICY_ACTION_ENCRYPT_L4)
-                continue;
-            if (!dctx->per_policy_ready || !dctx->per_policy_ready[pi] || cp->nonce_size <= 0)
-                continue;
-
-            int ns = cp->nonce_size;
-            int tunnel_off = -1;
-
-            if (ip_proto == 6) {
-                int off_new = transport_off;
-                if (off_new + ns + 1 < (int)*pkt_len &&
-                    pkt[off_new + ns + 1] == L4_TUNNEL_MAGIC &&
-                    (pkt[off_new + ns] == (uint8_t)cp->id) &&
-                    ((pkt[off_new] & 0x80) == 0)) {
-                    tunnel_off = off_new;
-                } else {
-                    int off_legacy = transport_off + tcp_hdr_len;
-                    if (off_legacy + ns + 1 < (int)*pkt_len &&
-                        pkt[off_legacy + ns + 1] == L4_TUNNEL_MAGIC &&
-                        (pkt[off_legacy + ns] == (uint8_t)cp->id) &&
-                        ((pkt[off_legacy] & 0x80) == 0)) {
-                        tunnel_off = off_legacy;
-                    }
-                }
-            } else {
-                int off_udp = transport_off + 8;
-                if (off_udp + ns + 1 < (int)*pkt_len &&
-                    pkt[off_udp + ns + 1] == L4_TUNNEL_MAGIC &&
-                    (pkt[off_udp + ns] == (uint8_t)cp->id) &&
-                    ((pkt[off_udp] & 0x80) == 0)) {
-                    tunnel_off = off_udp;
+        uint8_t policy_id = 0;
+        int nonce_size = 0;
+        if (crypto_l4_extract_policy_id_ipv4(pkt, *pkt_len, &policy_id, &nonce_size) != 0)
+            return 0;
+        int pi = lookup_policy_index(dctx,
+                                     dctx->policies, dctx->policy_count,
+                                     dctx->policy_index_by_action_id,
+                                     POLICY_ACTION_ENCRYPT_L4, policy_id);
+        if (pi >= 0 && dctx->per_policy_ready && dctx->per_policy_ready[pi]) {
+            const struct crypto_policy *cp = &dctx->policies[pi];
+            if (cp->nonce_size > 0 && cp->nonce_size == nonce_size) {
+                crypto_apply_from_policy(cp);
+                int new_len = packet_decrypt(&dctx->per_policy_ctx[pi], pkt, *pkt_len);
+                if (new_len >= 0) {
+                    *pkt_len = (uint32_t)new_len;
+                    return 0;
                 }
             }
-
-            if (tunnel_off < 0)
-                continue;
-
-            crypto_apply_from_policy(cp);
-            int new_len = packet_decrypt(&dctx->per_policy_ctx[pi], pkt, *pkt_len);
-            if (new_len < 0)
-                return -1;
-            *pkt_len = (uint32_t)new_len;
-            return 0;
         }
 
-
+        if (dctx->prev_grace_active && dctx->prev_policies && dctx->prev_policy_count > 0) {
+            int ppi = lookup_policy_index(dctx,
+                                          dctx->prev_policies, dctx->prev_policy_count,
+                                          dctx->prev_policy_index_by_action_id,
+                                          POLICY_ACTION_ENCRYPT_L4, policy_id);
+            if (ppi >= 0 && dctx->prev_per_policy_ready && dctx->prev_per_policy_ready[ppi]) {
+                const struct crypto_policy *cp_prev = &dctx->prev_policies[ppi];
+                if (cp_prev->nonce_size > 0 && cp_prev->nonce_size == nonce_size) {
+                    crypto_apply_from_policy(cp_prev);
+                    int new_len = packet_decrypt(&dctx->prev_per_policy_ctx[ppi], pkt, *pkt_len);
+                    if (new_len >= 0) {
+                        *pkt_len = (uint32_t)new_len;
+                        return 0;
+                    }
+                }
+            }
+        }
         return 0;
     }
 

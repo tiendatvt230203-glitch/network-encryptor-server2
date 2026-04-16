@@ -28,6 +28,7 @@ struct forwarder {
 };
 
 int forwarder_init(struct forwarder *fwd, struct app_config *cfg);
+int forwarder_reload_config(struct forwarder *fwd, struct app_config *cfg);
 void forwarder_cleanup(struct forwarder *fwd);
 void forwarder_run(struct forwarder *fwd);
 void forwarder_stop(void);

@@ -214,10 +214,6 @@ int crypto_layer3_decrypt(struct packet_crypto_ctx *ctx, uint8_t *packet, size_t
             packet[IPV4_CKSUM_OFF] = (uint8_t)(cksum >> 8);
             packet[IPV4_CKSUM_OFF + 1] = (uint8_t)(cksum & 0xFF);
 
-            /* Restore L4 checksum(s) for the restored protocol.
-             * TCP/UDP checksums include fields from the restored IP header,
-             * so after decrypt/strip we must recompute for correctness.
-             */
             size_t dec_pkt_len = pkt_len - (size_t)total_overhead;
             int ip_hdr_len = (packet[ETH_HEADER_SIZE] & 0x0F) * 4;
             size_t transport_off = (size_t)ETH_HEADER_SIZE + (size_t)ip_hdr_len;

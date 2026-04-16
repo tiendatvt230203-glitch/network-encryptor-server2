@@ -27,6 +27,7 @@
 #include <net/if_arp.h>
 #include <netinet/if_ether.h>
 #include <arpa/inet.h>
+#include <stdatomic.h>
 
 
 #define NUM_WORKERS 1
@@ -43,17 +44,215 @@ static struct flow_table g_flow_table;
 
 static struct packet_crypto_ctx g_policy_crypto_ctx[MAX_CRYPTO_POLICIES];
 static int g_policy_crypto_ctx_ready[MAX_CRYPTO_POLICIES];
+static int g_policy_index_by_action_id[POLICY_ACTION_ENCRYPT_L4 + 1][256];
+static struct crypto_policy g_active_policies[MAX_CRYPTO_POLICIES];
+static int g_active_policy_count = 0;
+static struct packet_crypto_ctx g_prev_policy_crypto_ctx[MAX_CRYPTO_POLICIES];
+static int g_prev_policy_crypto_ctx_ready[MAX_CRYPTO_POLICIES];
+static int g_prev_policy_index_by_action_id[POLICY_ACTION_ENCRYPT_L4 + 1][256];
+static struct crypto_policy g_prev_policies[MAX_CRYPTO_POLICIES];
+static int g_prev_policy_count = 0;
+static uint64_t g_prev_policy_grace_until_ms = 0;
+#define POLICY_RELOAD_GRACE_MS 60000ULL
 static uint64_t g_profile_hits[MAX_PROFILES];
 static uint64_t g_profile_miss_hits;
 static uint64_t g_profile_log_seq;
 
 
 static struct app_config *g_cfg_ptr = NULL;
+static atomic_int g_reload_pause = 0;
+static atomic_int g_inflight_packets = 0;
 
 static inline uint32_t clamp_u32(uint32_t v, uint32_t lo, uint32_t hi) {
     if (v < lo) return lo;
     if (v > hi) return hi;
     return v;
+}
+
+static int packet_critical_enter(void) {
+    for (;;) {
+        while (atomic_load_explicit(&g_reload_pause, memory_order_acquire))
+            sched_yield();
+        atomic_fetch_add_explicit(&g_inflight_packets, 1, memory_order_acq_rel);
+        if (!atomic_load_explicit(&g_reload_pause, memory_order_acquire))
+            return 1;
+        atomic_fetch_sub_explicit(&g_inflight_packets, 1, memory_order_acq_rel);
+    }
+}
+
+static void packet_critical_leave(void) {
+    atomic_fetch_sub_explicit(&g_inflight_packets, 1, memory_order_acq_rel);
+}
+
+static uint64_t monotonic_ms(void) {
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
+        return 0;
+    return ((uint64_t)ts.tv_sec * 1000ULL) + ((uint64_t)ts.tv_nsec / 1000000ULL);
+}
+
+static int prev_policy_grace_active(void) {
+    if (g_prev_policy_count <= 0)
+        return 0;
+    uint64_t now = monotonic_ms();
+    if (now == 0 || g_prev_policy_grace_until_ms == 0)
+        return 0;
+    return now <= g_prev_policy_grace_until_ms;
+}
+
+static int same_topology(const struct app_config *a, const struct app_config *b) {
+    if (!a || !b)
+        return 0;
+    if (a->local_count != b->local_count || a->wan_count != b->wan_count)
+        return 0;
+    for (int i = 0; i < a->local_count; i++) {
+        if (strcmp(a->locals[i].ifname, b->locals[i].ifname) != 0)
+            return 0;
+    }
+    for (int i = 0; i < a->wan_count; i++) {
+        if (strcmp(a->wans[i].ifname, b->wans[i].ifname) != 0)
+            return 0;
+    }
+    return 1;
+}
+
+static int same_crypto_policy(const struct crypto_policy *a, const struct crypto_policy *b) {
+    if (!a || !b)
+        return 0;
+    return a->id == b->id &&
+           a->db_id == b->db_id &&
+           a->priority == b->priority &&
+           a->action == b->action &&
+           a->protocol == b->protocol &&
+           a->src_port_from == b->src_port_from &&
+           a->src_port_to == b->src_port_to &&
+           a->dst_port_from == b->dst_port_from &&
+           a->dst_port_to == b->dst_port_to &&
+           a->src_any == b->src_any &&
+           a->dst_any == b->dst_any &&
+           a->src_negate == b->src_negate &&
+           a->dst_negate == b->dst_negate &&
+           a->src_net == b->src_net &&
+           a->src_mask == b->src_mask &&
+           a->dst_net == b->dst_net &&
+           a->dst_mask == b->dst_mask &&
+           a->crypto_mode == b->crypto_mode &&
+           a->aes_bits == b->aes_bits &&
+           a->nonce_size == b->nonce_size &&
+           memcmp(a->key, b->key, AES_KEY_LEN) == 0;
+}
+
+static int crypto_runtime_changed(const struct app_config *a, const struct app_config *b) {
+    if (!a || !b)
+        return 1;
+    if (a->crypto_enabled != b->crypto_enabled ||
+        a->encrypt_layer != b->encrypt_layer ||
+        a->crypto_mode != b->crypto_mode ||
+        a->aes_bits != b->aes_bits ||
+        a->nonce_size != b->nonce_size ||
+        a->fake_ethertype_ipv4 != b->fake_ethertype_ipv4 ||
+        a->fake_ethertype_ipv6 != b->fake_ethertype_ipv6 ||
+        a->fake_protocol != b->fake_protocol ||
+        a->policy_count != b->policy_count) {
+        return 1;
+    }
+    for (int i = 0; i < a->policy_count && i < MAX_CRYPTO_POLICIES; i++) {
+        if (!same_crypto_policy(&a->policies[i], &b->policies[i]))
+            return 1;
+    }
+    return 0;
+}
+
+static int forwarding_runtime_changed(const struct app_config *a, const struct app_config *b) {
+    if (!a || !b)
+        return 1;
+    if (a->profile_count != b->profile_count ||
+        a->wan_count != b->wan_count ||
+        a->local_count != b->local_count ||
+        a->redirect.src_count != b->redirect.src_count ||
+        a->redirect.dst_count != b->redirect.dst_count) {
+        return 1;
+    }
+    for (uint32_t i = 0; i < a->redirect.src_count && i < MAX_SRC_NETS; i++) {
+        if (a->redirect.src_net[i] != b->redirect.src_net[i] ||
+            a->redirect.src_mask[i] != b->redirect.src_mask[i]) {
+            return 1;
+        }
+    }
+    for (uint32_t i = 0; i < a->redirect.dst_count && i < MAX_DST_NETS; i++) {
+        if (a->redirect.dst_net[i] != b->redirect.dst_net[i] ||
+            a->redirect.dst_mask[i] != b->redirect.dst_mask[i]) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int rebuild_crypto_runtime(const struct app_config *cfg, int *has_encrypt_l2_out) {
+    int has_encrypt_l2 = 0;
+    struct packet_crypto_ctx old_ctx[MAX_CRYPTO_POLICIES];
+    int old_ready[MAX_CRYPTO_POLICIES];
+    struct crypto_policy old_policies[MAX_CRYPTO_POLICIES];
+    int old_policy_count = g_active_policy_count;
+    if (old_policy_count > MAX_CRYPTO_POLICIES)
+        old_policy_count = MAX_CRYPTO_POLICIES;
+    memcpy(old_ctx, g_policy_crypto_ctx, sizeof(old_ctx));
+    memcpy(old_ready, g_policy_crypto_ctx_ready, sizeof(old_ready));
+    memcpy(old_policies, g_active_policies, sizeof(old_policies));
+
+    memset(g_policy_crypto_ctx_ready, 0, sizeof(g_policy_crypto_ctx_ready));
+    for (int a = 0; a <= POLICY_ACTION_ENCRYPT_L4; a++) {
+        for (int id = 0; id < 256; id++)
+            g_policy_index_by_action_id[a][id] = -1;
+    }
+
+    for (int pi = 0; pi < cfg->policy_count && pi < MAX_CRYPTO_POLICIES; pi++) {
+        const struct crypto_policy *cp = &cfg->policies[pi];
+        if (!cp || cp->action == POLICY_ACTION_BYPASS)
+            continue;
+        int key_nonzero = 0;
+        for (int k = 0; k < AES_KEY_LEN; k++) {
+            if (cp->key[k] != 0) { key_nonzero = 1; break; }
+        }
+        if (!key_nonzero)
+            continue;
+
+        int reused = 0;
+        for (int oi = 0; oi < old_policy_count; oi++) {
+            if (!old_ready[oi])
+                continue;
+            if (!same_crypto_policy(&old_policies[oi], cp))
+                continue;
+            g_policy_crypto_ctx[pi] = old_ctx[oi];
+            g_policy_crypto_ctx_ready[pi] = 1;
+            reused = 1;
+            break;
+        }
+
+        if (!reused) {
+            packet_crypto_set_aes_bits(cp->aes_bits);
+            if (packet_crypto_init(&g_policy_crypto_ctx[pi], cp->key) != 0) {
+                fprintf(stderr, "[DB CRYPTO] Failed to init policy ctx id=%d (AES=%d)\n",
+                        cp->id, cp->aes_bits);
+                continue;
+            }
+            g_policy_crypto_ctx_ready[pi] = 1;
+        }
+        if (cp->action >= 0 && cp->action <= POLICY_ACTION_ENCRYPT_L4) {
+            uint8_t pid = (uint8_t)cp->id;
+            if (g_policy_index_by_action_id[cp->action][pid] < 0)
+                g_policy_index_by_action_id[cp->action][pid] = pi;
+        }
+        if (cp->action == POLICY_ACTION_ENCRYPT_L2)
+            has_encrypt_l2 = 1;
+    }
+    g_active_policy_count = cfg->policy_count;
+    if (g_active_policy_count > MAX_CRYPTO_POLICIES)
+        g_active_policy_count = MAX_CRYPTO_POLICIES;
+    memcpy(g_active_policies, cfg->policies, sizeof(g_active_policies));
+    if (has_encrypt_l2_out)
+        *has_encrypt_l2_out = has_encrypt_l2;
+    return 0;
 }
 
 static void compute_profile_weighted_wan_windows(const struct app_config *cfg,
@@ -62,14 +261,10 @@ static void compute_profile_weighted_wan_windows(const struct app_config *cfg,
     if (!cfg || !out_wan_window_sizes || max_wans <= 0)
         return;
 
-    /* Base window (bytes) that will be scaled by BE % weight.
-     * Keeping a large base reduces switching frequency (more stable, less reorder).
-     */
     const uint32_t base_kb = WAN_REORDER_WINDOW_KB;
     const uint32_t base_bytes = base_kb * 1024U;
 
-    /* Don't let low-weight WAN get too tiny (prevents rapid switching). */
-    const uint32_t min_kb = 512; /* 512KB */
+    const uint32_t min_kb = 512;
     const uint32_t min_bytes = min_kb * 1024U;
 
     for (int pi = 0; pi < cfg->profile_count; pi++) {
@@ -84,7 +279,7 @@ static void compute_profile_weighted_wan_windows(const struct app_config *cfg,
                 sumw += w;
         }
         if (sumw <= 0)
-            continue; /* no explicit weights -> keep default windows */
+            continue;
 
         for (int i = 0; i < p->wan_count; i++) {
             int wan_idx = p->wan_indices[i];
@@ -92,7 +287,7 @@ static void compute_profile_weighted_wan_windows(const struct app_config *cfg,
             if (wan_idx < 0 || wan_idx >= max_wans)
                 continue;
             if (w <= 0)
-                continue; /* weight=0 means excluded when any_weight is enabled */
+                continue;
 
             uint64_t scaled = ((uint64_t)base_bytes * (uint64_t)w) / (uint64_t)sumw;
             uint32_t win = (scaled > (uint64_t)UINT32_MAX) ? UINT32_MAX : (uint32_t)scaled;
@@ -312,22 +507,28 @@ static int decrypt_packet_auto_l2(struct forwarder *fwd,
 
 
     uint8_t policy_id = pkt[13];
-
-    for (int pi = 0; pi < fwd->cfg->policy_count && pi < MAX_CRYPTO_POLICIES; pi++) {
+    int pi = g_policy_index_by_action_id[POLICY_ACTION_ENCRYPT_L2][policy_id];
+    if (pi >= 0 && pi < fwd->cfg->policy_count && g_policy_crypto_ctx_ready[pi]) {
         const struct crypto_policy *cp = &fwd->cfg->policies[pi];
-        if (!cp || cp->action != POLICY_ACTION_ENCRYPT_L2)
-            continue;
-        if (!g_policy_crypto_ctx_ready[pi])
-            continue;
-        if ((uint8_t)cp->id != policy_id)
-            continue;
-
         apply_crypto_params_from_policy(cp);
         int new_len = packet_decrypt(&g_policy_crypto_ctx[pi], pkt, *pkt_len);
         if (new_len < 0)
             return -1;
         *pkt_len = (uint32_t)new_len;
         return 0;
+    }
+
+    if (prev_policy_grace_active()) {
+        int ppi = g_prev_policy_index_by_action_id[POLICY_ACTION_ENCRYPT_L2][policy_id];
+        if (ppi >= 0 && ppi < g_prev_policy_count && g_prev_policy_crypto_ctx_ready[ppi]) {
+            const struct crypto_policy *cp_prev = &g_prev_policies[ppi];
+            apply_crypto_params_from_policy(cp_prev);
+            int new_len = packet_decrypt(&g_prev_policy_crypto_ctx[ppi], pkt, *pkt_len);
+            if (new_len < 0)
+                return -1;
+            *pkt_len = (uint32_t)new_len;
+            return 0;
+        }
     }
 
 
@@ -363,7 +564,16 @@ static int decrypt_packet_auto_by_action(struct forwarder *fwd,
     struct crypto_dispatch_ctx dctx = {
         .base_ctx = &crypto_ctx,
         .per_policy_ctx = g_policy_crypto_ctx,
-        .per_policy_ready = g_policy_crypto_ctx_ready
+        .per_policy_ready = g_policy_crypto_ctx_ready,
+        .policies = fwd->cfg ? fwd->cfg->policies : NULL,
+        .policy_count = fwd->cfg ? fwd->cfg->policy_count : 0,
+        .policy_index_by_action_id = g_policy_index_by_action_id,
+        .prev_per_policy_ctx = g_prev_policy_crypto_ctx,
+        .prev_per_policy_ready = g_prev_policy_crypto_ctx_ready,
+        .prev_policies = g_prev_policies,
+        .prev_policy_count = g_prev_policy_count,
+        .prev_policy_index_by_action_id = g_prev_policy_index_by_action_id,
+        .prev_grace_active = prev_policy_grace_active()
     };
     return crypto_decrypt_packet_auto_by_action(crypto_enabled, fwd->cfg, &dctx,
                                                 action_layer, pkt, pkt_len,
@@ -474,6 +684,7 @@ static void *local_queue_thread_no_crypto(void *arg) {
                                                pkt_ptrs, pkt_lens, addrs, batch_size);
         if (rcvd <= 0)
             continue;
+        packet_critical_enter();
 
         int wan_used[MAX_INTERFACES] = {0};
         int wan_tx_q[MAX_INTERFACES];
@@ -481,9 +692,9 @@ static void *local_queue_thread_no_crypto(void *arg) {
             wan_tx_q[w] = tx_base % fwd->wans[w].queue_count;
 
         for (int i = 0; i < rcvd; i++) {
-            uint32_t src_ip, dst_ip;
-            uint16_t src_port, dst_port;
-            uint8_t protocol;
+            uint32_t src_ip = 0, dst_ip = 0;
+            uint16_t src_port = 0, dst_port = 0;
+            uint8_t protocol = 0;
 
             int wan_idx;
             if (parse_flow(pkt_ptrs[i], pkt_lens[i],
@@ -521,6 +732,7 @@ static void *local_queue_thread_no_crypto(void *arg) {
         }
 
         interface_recv_release_single_queue(local, queue_idx, addrs, rcvd);
+        packet_critical_leave();
     }
 
     return NULL;
@@ -546,6 +758,7 @@ static void *wan_queue_thread_no_crypto(void *arg) {
                                                 pkt_ptrs, pkt_lens, addrs, batch_size);
         if (rcvd <= 0)
             continue;
+        packet_critical_enter();
 
         uint32_t local_used_queues[MAX_INTERFACES] = {0};
 
@@ -614,6 +827,7 @@ static void *wan_queue_thread_no_crypto(void *arg) {
         }
 
         interface_recv_release_single_queue(wan, queue_idx, addrs, rcvd);
+        packet_critical_leave();
     }
 
     return NULL;
@@ -640,6 +854,7 @@ static void *local_queue_thread_l2(void *arg) {
                                                pkt_ptrs, pkt_lens, addrs, batch_size);
         if (rcvd <= 0)
             continue;
+        packet_critical_enter();
 
         int wan_used[MAX_INTERFACES] = {0};
         int wan_tx_q[MAX_INTERFACES];
@@ -647,13 +862,15 @@ static void *local_queue_thread_l2(void *arg) {
             wan_tx_q[w] = tx_base % fwd->wans[w].queue_count;
 
         for (int i = 0; i < rcvd; i++) {
-            uint32_t src_ip, dst_ip;
-            uint16_t src_port, dst_port;
-            uint8_t protocol;
+            uint32_t src_ip = 0, dst_ip = 0;
+            uint16_t src_port = 0, dst_port = 0;
+            uint8_t protocol = 0;
+            int flow_ok = 0;
 
             int wan_idx;
             if (parse_flow(pkt_ptrs[i], pkt_lens[i],
                            &src_ip, &dst_ip, &src_port, &dst_port, &protocol) == 0) {
+                flow_ok = 1;
                 wan_idx = select_wan_idx_for_packet(fwd,
                                                     src_ip, dst_ip, src_port, dst_port,
                                                     protocol, pkt_lens[i]);
@@ -675,12 +892,16 @@ static void *local_queue_thread_l2(void *arg) {
                 continue;
             }
 
-            const struct crypto_policy *cp = select_crypto_policy_for_packet(fwd,
-                                                                             src_ip, dst_ip,
-                                                                             src_port, dst_port,
-                                                                             protocol);
+            const struct crypto_policy *cp = NULL;
+            if (flow_ok) {
+                cp = select_crypto_policy_for_packet(fwd,
+                                                     src_ip, dst_ip,
+                                                     src_port, dst_port,
+                                                     protocol);
+            }
             struct packet_crypto_ctx *use_ctx = &crypto_ctx;
             int bypass_crypto = 0;
+            int drop_unmatched = 0;
 
             if (cp) {
                 if (cp->action == POLICY_ACTION_BYPASS) {
@@ -699,8 +920,13 @@ static void *local_queue_thread_l2(void *arg) {
                         apply_crypto_params_from_policy(cp);
                 }
             } else {
+                drop_unmatched = (fwd->cfg && fwd->cfg->policy_count > 0) ? 1 : 0;
+                bypass_crypto = !drop_unmatched;
+            }
 
-                bypass_crypto = 1;
+            if (drop_unmatched) {
+                __sync_fetch_and_add(&fwd->total_dropped, 1);
+                continue;
             }
 
             if (bypass_crypto) {
@@ -731,6 +957,7 @@ static void *local_queue_thread_l2(void *arg) {
         }
 
         interface_recv_release_single_queue(local, queue_idx, addrs, rcvd);
+        packet_critical_leave();
     }
 
     return NULL;
@@ -757,6 +984,7 @@ static void *local_queue_thread_l3l4(void *arg) {
                                                pkt_ptrs, pkt_lens, addrs, batch_size);
         if (rcvd <= 0)
             continue;
+        packet_critical_enter();
 
 
         for (int i = 0; i < rcvd; i++) {
@@ -800,6 +1028,7 @@ static void *local_queue_thread_l3l4(void *arg) {
                 interface_recv_release_single_queue(local, queue_idx, &addrs[i], 1);
             }
         }
+        packet_critical_leave();
     }
 
     return NULL;
@@ -828,6 +1057,7 @@ static void *wan_queue_thread_l2(void *arg) {
                                                 pkt_ptrs, pkt_lens, addrs, batch_size);
         if (rcvd <= 0)
             continue;
+        packet_critical_enter();
 
         uint32_t local_used_queues[MAX_INTERFACES] = {0};
 
@@ -904,6 +1134,7 @@ static void *wan_queue_thread_l2(void *arg) {
         }
 
         interface_recv_release_single_queue(wan, queue_idx, addrs, rcvd);
+        packet_critical_leave();
 
     }
     return NULL;
@@ -932,6 +1163,7 @@ static void *wan_queue_thread_l3l4(void *arg) {
                                                 pkt_ptrs, pkt_lens, addrs, batch_size);
         if (rcvd <= 0)
             continue;
+        packet_critical_enter();
 
         uint32_t local_used_queues[MAX_INTERFACES] = {0};
 
@@ -948,17 +1180,19 @@ static void *wan_queue_thread_l3l4(void *arg) {
                 uint8_t policy_id = 0;
                 int found = 0;
                 if (l3_extract_policy_id(pkt, pkt_len, &policy_id) == 0) {
-                    for (int pi = 0; pi < fwd->cfg->policy_count && pi < MAX_CRYPTO_POLICIES; pi++) {
+                    int pi = g_policy_index_by_action_id[POLICY_ACTION_ENCRYPT_L3][policy_id];
+                    if (pi >= 0 && pi < fwd->cfg->policy_count && g_policy_crypto_ctx_ready[pi]) {
                         const struct crypto_policy *cp = &fwd->cfg->policies[pi];
-                        if (!cp || cp->action != POLICY_ACTION_ENCRYPT_L3)
-                            continue;
-                        if (!g_policy_crypto_ctx_ready[pi])
-                            continue;
-                        if ((uint8_t)cp->id != policy_id)
-                            continue;
                         apply_crypto_params_from_policy(cp);
                         found = 1;
-                        break;
+                    }
+                    if (!found && prev_policy_grace_active()) {
+                        int ppi = g_prev_policy_index_by_action_id[POLICY_ACTION_ENCRYPT_L3][policy_id];
+                        if (ppi >= 0 && ppi < g_prev_policy_count && g_prev_policy_crypto_ctx_ready[ppi]) {
+                            const struct crypto_policy *cp_prev = &g_prev_policies[ppi];
+                            apply_crypto_params_from_policy(cp_prev);
+                            found = 1;
+                        }
                     }
                 }
                 if (!found)
@@ -1059,6 +1293,7 @@ static void *wan_queue_thread_l3l4(void *arg) {
         }
 
         interface_recv_release_single_queue(wan, queue_idx, addrs, rcvd);
+        packet_critical_leave();
 
     }
     return NULL;
@@ -1093,6 +1328,7 @@ static void *worker_thread(void *arg) {
             sched_yield();
             continue;
         }
+        packet_critical_enter();
 
         struct forwarder *fwd = job.fwd;
         if (!fwd) {
@@ -1176,7 +1412,10 @@ static void *worker_thread(void *arg) {
                             apply_crypto_params_from_policy(cp);
                     }
                 } else {
-
+                    if (fwd->cfg && fwd->cfg->policy_count > 0) {
+                        __sync_fetch_and_add(&fwd->total_dropped, 1);
+                        goto release_local;
+                    }
                     bypass_crypto = 1;
                 }
             }
@@ -1255,6 +1494,7 @@ release_local:
             struct xsk_interface *local = &job.fwd->locals[job.local_idx];
             interface_recv_release_single_queue(local, job.queue_idx, &job.addr, 1);
         }
+        packet_critical_leave();
     }
 
     return NULL;
@@ -1276,6 +1516,25 @@ int forwarder_init(struct forwarder *fwd, struct app_config *cfg) {
     crypto_layer = cfg->encrypt_layer;
     int has_encrypt_l2 = 0;
     if (crypto_enabled) {
+        if (g_active_policy_count > 0) {
+            memcpy(g_prev_policy_crypto_ctx, g_policy_crypto_ctx, sizeof(g_prev_policy_crypto_ctx));
+            memcpy(g_prev_policy_crypto_ctx_ready, g_policy_crypto_ctx_ready, sizeof(g_prev_policy_crypto_ctx_ready));
+            memcpy(g_prev_policy_index_by_action_id, g_policy_index_by_action_id, sizeof(g_prev_policy_index_by_action_id));
+            memcpy(g_prev_policies, g_active_policies, sizeof(g_prev_policies));
+            g_prev_policy_count = g_active_policy_count;
+            g_prev_policy_grace_until_ms = monotonic_ms() + POLICY_RELOAD_GRACE_MS;
+            fprintf(stderr, "[CRYPTO] policy grace window active for %llu ms\n",
+                    (unsigned long long)POLICY_RELOAD_GRACE_MS);
+        } else {
+            memset(g_prev_policy_crypto_ctx_ready, 0, sizeof(g_prev_policy_crypto_ctx_ready));
+            for (int a = 0; a <= POLICY_ACTION_ENCRYPT_L4; a++) {
+                for (int id = 0; id < 256; id++)
+                    g_prev_policy_index_by_action_id[a][id] = -1;
+            }
+            g_prev_policy_count = 0;
+            g_prev_policy_grace_until_ms = 0;
+        }
+
         packet_crypto_set_aes_bits(cfg->aes_bits);
         if (packet_crypto_init(&crypto_ctx, cfg->crypto_key) != 0) {
             fprintf(stderr, "Failed to initialize AES-%d encryption\n", cfg->aes_bits);
@@ -1283,37 +1542,7 @@ int forwarder_init(struct forwarder *fwd, struct app_config *cfg) {
         }
 
 
-        memset(g_policy_crypto_ctx_ready, 0, sizeof(g_policy_crypto_ctx_ready));
-        for (int pi = 0; pi < cfg->policy_count && pi < MAX_CRYPTO_POLICIES; pi++) {
-            const struct crypto_policy *cp = &cfg->policies[pi];
-            if (!cp)
-                continue;
-            if (cp->action == POLICY_ACTION_BYPASS)
-                continue;
-
-            int key_nonzero = 0;
-            for (int k = 0; k < AES_KEY_LEN; k++) {
-                if (cp->key[k] != 0) { key_nonzero = 1; break; }
-            }
-            if (!key_nonzero)
-                continue;
-
-            packet_crypto_set_aes_bits(cp->aes_bits);
-            if (packet_crypto_init(&g_policy_crypto_ctx[pi], cp->key) != 0) {
-                fprintf(stderr, "[DB CRYPTO] Failed to init policy ctx id=%d (AES=%d)\n",
-                        cp->id, cp->aes_bits);
-                continue;
-            }
-            g_policy_crypto_ctx_ready[pi] = 1;
-        }
-
-
-        for (int pi = 0; pi < cfg->policy_count && pi < MAX_CRYPTO_POLICIES; pi++) {
-            if (cfg->policies[pi].action == POLICY_ACTION_ENCRYPT_L2 && g_policy_crypto_ctx_ready[pi]) {
-                has_encrypt_l2 = 1;
-                break;
-            }
-        }
+        rebuild_crypto_runtime(cfg, &has_encrypt_l2);
 
         packet_crypto_set_encrypt_layer(cfg->encrypt_layer);
         packet_crypto_set_mode(cfg->crypto_mode);
@@ -1332,6 +1561,9 @@ int forwarder_init(struct forwarder *fwd, struct app_config *cfg) {
             else
                 packet_crypto_set_fake_protocol(99);
         }
+
+    } else {
+        g_active_policy_count = 0;
     }
 
 
@@ -1429,6 +1661,49 @@ err_locals:
         interface_cleanup(&fwd->locals[j]);
     flow_table_cleanup(&g_flow_table);
     return -1;
+}
+
+int forwarder_reload_config(struct forwarder *fwd, struct app_config *cfg) {
+    if (!fwd || !cfg || !fwd->cfg)
+        return -1;
+    if (!same_topology(fwd->cfg, cfg)) {
+        fprintf(stderr, "[RELOAD] topology changed; hot reload rejected\n");
+        return -1;
+    }
+    int need_crypto_reload = crypto_runtime_changed(fwd->cfg, cfg);
+    int need_forwarding_reload = forwarding_runtime_changed(fwd->cfg, cfg);
+    if (!need_crypto_reload && !need_forwarding_reload) {
+        fwd->cfg = cfg;
+        g_cfg_ptr = cfg;
+        fprintf(stderr, "[RELOAD] skipped: config is unchanged\n");
+        return 0;
+    }
+
+    atomic_store_explicit(&g_reload_pause, 1, memory_order_release);
+    while (atomic_load_explicit(&g_inflight_packets, memory_order_acquire) > 0)
+        sched_yield();
+
+    fwd->cfg = cfg;
+    g_cfg_ptr = cfg;
+    crypto_enabled = cfg->crypto_enabled;
+    crypto_layer = cfg->encrypt_layer;
+    if (crypto_enabled && need_crypto_reload) {
+        int has_encrypt_l2 = 0;
+        rebuild_crypto_runtime(cfg, &has_encrypt_l2);
+        packet_crypto_set_encrypt_layer(cfg->encrypt_layer);
+        packet_crypto_set_mode(cfg->crypto_mode);
+        packet_crypto_set_nonce_size(cfg->nonce_size);
+        if (has_encrypt_l2)
+            packet_crypto_set_ethertype(cfg->fake_ethertype_ipv4, cfg->fake_ethertype_ipv6);
+        if (cfg->encrypt_layer == 3)
+            packet_crypto_set_fake_protocol(cfg->fake_protocol ? cfg->fake_protocol : 99);
+    }
+
+    atomic_store_explicit(&g_reload_pause, 0, memory_order_release);
+    fprintf(stderr, "[RELOAD] hot reload applied in-place (crypto=%s, forwarding=%s)\n",
+            need_crypto_reload ? "yes" : "no",
+            need_forwarding_reload ? "yes" : "no");
+    return 0;
 }
 
 void forwarder_cleanup(struct forwarder *fwd) {

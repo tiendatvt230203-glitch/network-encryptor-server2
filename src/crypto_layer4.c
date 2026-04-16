@@ -268,7 +268,6 @@ int crypto_layer4_decrypt(struct packet_crypto_ctx *ctx, uint8_t *packet, size_t
         packet[l3_off + 10] = (uint8_t)(cksum >> 8);
         packet[l3_off + 11] = (uint8_t)(cksum & 0xFF);
 
-        /* Recompute transport checksum after decrypt/strip. */
         size_t new_pkt_len = pkt_len - (size_t)total_overhead;
         if (ip_proto == 6) {
             uint8_t *tcp_seg = packet + transport_off;
@@ -489,7 +488,6 @@ int crypto_layer4_decrypt_fragment(struct packet_crypto_ctx *ctx,
         packet[l3_off + 10] = (uint8_t)(cksum >> 8);
         packet[l3_off + 11] = (uint8_t)(cksum & 0xFF);
 
-        /* Restore transport checksum(s) after decrypt/strip. */
         size_t new_pkt_len = pkt_len - (size_t)total_overhead;
         if (ip_proto == 6) {
             uint8_t *tcp_seg = packet + transport_off;

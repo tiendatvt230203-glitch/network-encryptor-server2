@@ -58,6 +58,28 @@ static uint8_t parse_protocol_name(const char *v) {
     return (uint8_t)atoi(v);
 }
 
+static int alloc_wire_policy_id(int db_row_id, uint8_t *used) {
+    if (db_row_id >= 1 && db_row_id <= 255 && !used[(size_t)db_row_id]) {
+        used[(size_t)db_row_id] = 1;
+        return db_row_id;
+    }
+    for (int j = 1; j <= 255; j++) {
+        if (!used[(size_t)j]) {
+            used[(size_t)j] = 1;
+            if (db_row_id < 1 || db_row_id > 255)
+                fprintf(stderr,
+                        "[DB CRYPTO] policy db id=%d not in wire range 1..255; assigned wire id=%d\n",
+                        db_row_id, j);
+            else
+                fprintf(stderr,
+                        "[DB CRYPTO] policy db id=%d: wire id %d already in use; assigned wire id=%d\n",
+                        db_row_id, db_row_id, j);
+            return j;
+        }
+    }
+    return -1;
+}
+
 static int parse_action_name(const char *v) {
     if (!v) return POLICY_ACTION_BYPASS;
     if (strcasecmp(v, "bypass") == 0) return POLICY_ACTION_BYPASS;
@@ -98,6 +120,54 @@ static int parse_cidr_any_or_negated(const char *v_in, int *any_out, int *neg_ou
     *net_out = net;
     *mask_out = mask;
     return 0;
+}
+
+static void trim_spaces_inplace(char *s) {
+    if (!s)
+        return;
+    size_t len = strlen(s);
+    size_t start = 0;
+    while (start < len && (s[start] == ' ' || s[start] == '\t'))
+        start++;
+    size_t end = len;
+    while (end > start && (s[end - 1] == ' ' || s[end - 1] == '\t'))
+        end--;
+    if (start > 0 && end > start)
+        memmove(s, s + start, end - start);
+    if (end <= start) {
+        s[0] = '\0';
+        return;
+    }
+    s[end - start] = '\0';
+}
+
+#define MAX_CIDR_LIST_ITEMS 32
+#define MAX_CIDR_ITEM_LEN 64
+
+static int split_cidr_list(const char *input, char out[][MAX_CIDR_ITEM_LEN], int max_out) {
+    if (!input || !out || max_out <= 0)
+        return -1;
+
+    char buf[1024];
+    strncpy(buf, input, sizeof(buf) - 1);
+    buf[sizeof(buf) - 1] = '\0';
+    trim_spaces_inplace(buf);
+    if (buf[0] == '\0')
+        return -1;
+
+    int count = 0;
+    char *saveptr = NULL;
+    for (char *tok = strtok_r(buf, ",", &saveptr); tok; tok = strtok_r(NULL, ",", &saveptr)) {
+        if (count >= max_out)
+            return -1;
+        trim_spaces_inplace(tok);
+        if (tok[0] == '\0')
+            return -1;
+        strncpy(out[count], tok, MAX_CIDR_ITEM_LEN - 1);
+        out[count][MAX_CIDR_ITEM_LEN - 1] = '\0';
+        count++;
+    }
+    return (count > 0) ? count : -1;
 }
 
 static int find_local_index_by_ifname(const struct app_config *cfg, const char *ifname) {
@@ -144,6 +214,9 @@ static int load_profiles_and_policies(struct app_config *cfg, PGconn *conn, int 
     }
     PQclear(res);
 
+    uint8_t wire_id_used[256];
+    memset(wire_id_used, 0, sizeof(wire_id_used));
+    wire_id_used[0] = 1;
     for (int pi = 0; pi < cfg->profile_count; pi++) {
         struct profile_config *p = &cfg->profiles[pi];
         char profile_id_str[32];
@@ -216,32 +289,29 @@ static int load_profiles_and_policies(struct app_config *cfg, PGconn *conn, int 
             1, NULL, pp, NULL, NULL, 0);
         if (PQresultStatus(res) == PGRES_TUPLES_OK) {
             int rows = PQntuples(res);
-            for (int r = 0; r < rows && cfg->policy_count < MAX_CRYPTO_POLICIES; r++) {
-                if (p->policy_count >= MAX_CRYPTO_POLICIES)
-                    break;
-                struct crypto_policy *cp = &cfg->policies[cfg->policy_count];
-                memset(cp, 0, sizeof(*cp));
+            for (int r = 0; r < rows; r++) {
+                struct crypto_policy cp_base;
+                memset(&cp_base, 0, sizeof(cp_base));
 
-                cp->id = atoi(PQgetvalue(res, r, 0));
-                if (cp->id < 0 || cp->id > 255) {
+                int db_policy_id = atoi(PQgetvalue(res, r, 0));
+                if (db_policy_id < 0) {
                     fprintf(stderr,
-                            "[DB CRYPTO] policy id=%d is out of range (expected 0..255)\n",
-                            cp->id);
+                            "[DB CRYPTO] policy id=%d is invalid (expected >= 0)\n",
+                            db_policy_id);
                     PQclear(res);
                     return -1;
                 }
-                for (int prev = 0; prev < cfg->policy_count; prev++) {
-                    if (cfg->policies[prev].id == cp->id) {
-                        fprintf(stderr,
-                                "[DB CRYPTO] duplicated policy id=%d across profiles; id must be unique per config\n",
-                                cp->id);
-                        PQclear(res);
-                        return -1;
-                    }
+                int wire_id = alloc_wire_policy_id(db_policy_id, wire_id_used);
+                if (wire_id < 0) {
+                    fprintf(stderr, "[DB CRYPTO] no free wire policy id (max 255 policies)\n");
+                    PQclear(res);
+                    return -1;
                 }
-                cp->priority = atoi(PQgetvalue(res, r, 1));
-                cp->action = parse_action_name(PQgetvalue(res, r, 2));
-                cp->protocol = parse_protocol_name(PQgetvalue(res, r, 3));
+                cp_base.id = wire_id;
+                cp_base.db_id = db_policy_id;
+                cp_base.priority = atoi(PQgetvalue(res, r, 1));
+                cp_base.action = parse_action_name(PQgetvalue(res, r, 2));
+                cp_base.protocol = parse_protocol_name(PQgetvalue(res, r, 3));
 
                 const char *src_cidr = PQgetvalue(res, r, 4);
                 const char *src_port = PQgetvalue(res, r, 5);
@@ -253,53 +323,86 @@ static int load_profiles_and_policies(struct app_config *cfg, PGconn *conn, int 
                 const char *key_hex = PQgetvalue(res, r, 11);
 
 
-                if (parse_cidr_any_or_negated(src_cidr, &cp->src_any, &cp->src_negate,
-                                              &cp->src_net, &cp->src_mask) != 0) {
-                    cp->src_any = 1;
-                    cp->src_negate = 0;
+                if (parse_port_range(src_port, &cp_base.src_port_from, &cp_base.src_port_to) != 0) {
+                    cp_base.src_port_from = -1;
+                    cp_base.src_port_to = -1;
                 }
-                if (parse_cidr_any_or_negated(dst_cidr, &cp->dst_any, &cp->dst_negate,
-                                              &cp->dst_net, &cp->dst_mask) != 0) {
-                    cp->dst_any = 1;
-                    cp->dst_negate = 0;
+                if (parse_port_range(dst_port, &cp_base.dst_port_from, &cp_base.dst_port_to) != 0) {
+                    cp_base.dst_port_from = -1;
+                    cp_base.dst_port_to = -1;
                 }
 
-                if (parse_port_range(src_port, &cp->src_port_from, &cp->src_port_to) != 0) {
-                    cp->src_port_from = -1;
-                    cp->src_port_to = -1;
-                }
-                if (parse_port_range(dst_port, &cp->dst_port_from, &cp->dst_port_to) != 0) {
-                    cp->dst_port_from = -1;
-                    cp->dst_port_to = -1;
-                }
-
-                cp->crypto_mode = (mode && (strcasecmp(mode, "gcm") == 0)) ? CRYPTO_MODE_GCM : CRYPTO_MODE_CTR;
-                cp->aes_bits = bits ? atoi(bits) : 128;
-                cp->nonce_size = nonce ? atoi(nonce) : 12;
-                if (cp->aes_bits != 128 && cp->aes_bits != 256) {
+                cp_base.crypto_mode = (mode && (strcasecmp(mode, "gcm") == 0)) ? CRYPTO_MODE_GCM : CRYPTO_MODE_CTR;
+                cp_base.aes_bits = bits ? atoi(bits) : 128;
+                cp_base.nonce_size = nonce ? atoi(nonce) : 12;
+                if (cp_base.aes_bits != 128 && cp_base.aes_bits != 256) {
                     fprintf(stderr,
                             "[DB CRYPTO] policy id=%d has invalid aes_bits=%d (allowed: 128,256)\n",
-                            cp->id, cp->aes_bits);
+                            cp_base.id, cp_base.aes_bits);
                     PQclear(res);
                     return -1;
                 }
-                if (cp->nonce_size < 4 || cp->nonce_size > 16) {
+                if (cp_base.nonce_size < 4 || cp_base.nonce_size > 16) {
                     fprintf(stderr,
                             "[DB CRYPTO] policy id=%d has invalid nonce_size=%d (allowed: 4..16)\n",
-                            cp->id, cp->nonce_size);
+                            cp_base.id, cp_base.nonce_size);
                     PQclear(res);
                     return -1;
                 }
 
                 if (key_hex && key_hex[0] != '\0') {
-                    int key_len = (cp->aes_bits == 256) ? 32 : 16;
-                    if (parse_hex_bytes_pub(key_hex, cp->key, key_len) != 0) {
-                        memset(cp->key, 0, sizeof(cp->key));
+                    int key_len = (cp_base.aes_bits == 256) ? 32 : 16;
+                    if (parse_hex_bytes_pub(key_hex, cp_base.key, key_len) != 0) {
+                        memset(cp_base.key, 0, sizeof(cp_base.key));
                     }
                 }
 
-                p->policy_indices[p->policy_count++] = cfg->policy_count;
-                cfg->policy_count++;
+                char src_items[MAX_CIDR_LIST_ITEMS][MAX_CIDR_ITEM_LEN];
+                char dst_items[MAX_CIDR_LIST_ITEMS][MAX_CIDR_ITEM_LEN];
+                int src_n = split_cidr_list(src_cidr, src_items, MAX_CIDR_LIST_ITEMS);
+                int dst_n = split_cidr_list(dst_cidr, dst_items, MAX_CIDR_LIST_ITEMS);
+                if (src_n <= 0 || dst_n <= 0) {
+                    fprintf(stderr,
+                            "[DB CRYPTO] policy id=%d has invalid CIDR list src_cidr=%s dst_cidr=%s\n",
+                            cp_base.id,
+                            src_cidr ? src_cidr : "(null)",
+                            dst_cidr ? dst_cidr : "(null)");
+                    PQclear(res);
+                    return -1;
+                }
+
+                for (int si = 0; si < src_n; si++) {
+                    for (int di = 0; di < dst_n; di++) {
+                        if (cfg->policy_count >= MAX_CRYPTO_POLICIES || p->policy_count >= MAX_CRYPTO_POLICIES) {
+                            fprintf(stderr,
+                                    "[DB CRYPTO] policy expansion overflow for policy id=%d (MAX_CRYPTO_POLICIES=%d)\n",
+                                    cp_base.id, MAX_CRYPTO_POLICIES);
+                            PQclear(res);
+                            return -1;
+                        }
+
+                        struct crypto_policy *cp = &cfg->policies[cfg->policy_count];
+                        *cp = cp_base;
+
+                        if (parse_cidr_any_or_negated(src_items[si], &cp->src_any, &cp->src_negate,
+                                                      &cp->src_net, &cp->src_mask) != 0) {
+                            fprintf(stderr, "[DB CRYPTO] policy id=%d has invalid src_cidr item=%s\n",
+                                    cp->id, src_items[si]);
+                            PQclear(res);
+                            return -1;
+                        }
+                        if (parse_cidr_any_or_negated(dst_items[di], &cp->dst_any, &cp->dst_negate,
+                                                      &cp->dst_net, &cp->dst_mask) != 0) {
+                            fprintf(stderr, "[DB CRYPTO] policy id=%d has invalid dst_cidr item=%s\n",
+                                    cp->id, dst_items[di]);
+                            PQclear(res);
+                            return -1;
+                        }
+
+                        p->policy_indices[p->policy_count++] = cfg->policy_count;
+                        cfg->policy_count++;
+                    }
+                }
             }
         }
         PQclear(res);

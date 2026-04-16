@@ -12,6 +12,15 @@ struct crypto_dispatch_ctx {
     struct packet_crypto_ctx *base_ctx;                
     struct packet_crypto_ctx *per_policy_ctx;           
     int *per_policy_ready;                             
+    struct crypto_policy *policies;
+    int policy_count;
+    int (*policy_index_by_action_id)[256];
+    struct packet_crypto_ctx *prev_per_policy_ctx;
+    int *prev_per_policy_ready;
+    struct crypto_policy *prev_policies;
+    int prev_policy_count;
+    int (*prev_policy_index_by_action_id)[256];
+    int prev_grace_active;
 };
 
 

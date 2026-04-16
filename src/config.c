@@ -20,10 +20,14 @@ int parse_mac(const char *str, uint8_t *mac) {
 
 static int parse_ip_cidr(const char *str, uint32_t *ip, uint32_t *netmask, uint32_t *network) {
     char ip_str[32];
-    int prefix_len;
-
-    if (sscanf(str, "%31[^/]/%d", ip_str, &prefix_len) != 2)
-        return -1;
+    int prefix_len = 32;
+    if (strchr(str, '/')) {
+        if (sscanf(str, "%31[^/]/%d", ip_str, &prefix_len) != 2)
+            return -1;
+    } else {
+        if (sscanf(str, "%31s", ip_str) != 1)
+            return -1;
+    }
 
     if (prefix_len < 0 || prefix_len > 32)
         return -1;
@@ -263,6 +267,17 @@ int config_select_wan_for_profile(struct app_config *cfg, int profile_idx,
     return wan_idx;
 }
 
+static int crypto_policy_candidate_preferred(const struct crypto_policy *a, int a_pi,
+                                             const struct crypto_policy *b, int b_pi) {
+    if (!b)
+        return 1;
+    if (a->priority != b->priority)
+        return a->priority < b->priority;
+    if (a->db_id != b->db_id)
+        return a->db_id < b->db_id;
+    return a_pi < b_pi;
+}
+
 const struct crypto_policy *config_select_crypto_policy(struct app_config *cfg, int profile_idx,
                                                         uint32_t src_ip, uint32_t dst_ip,
                                                         uint16_t src_port, uint16_t dst_port,
@@ -273,6 +288,9 @@ const struct crypto_policy *config_select_crypto_policy(struct app_config *cfg, 
     const struct profile_config *p = &cfg->profiles[profile_idx];
 
     for (int pass = 0; pass < 2; pass++) {
+        const struct crypto_policy *best = NULL;
+        int best_pi = 0;
+
         for (int i = 0; i < p->policy_count; i++) {
             int pi = p->policy_indices[i];
             if (pi < 0 || pi >= cfg->policy_count)
@@ -301,8 +319,13 @@ const struct crypto_policy *config_select_crypto_policy(struct app_config *cfg, 
                 if ((int)dst_port < cp->dst_port_from || (int)dst_port > cp->dst_port_to)
                     continue;
             }
-            return cp;
+            if (crypto_policy_candidate_preferred(cp, pi, best, best_pi)) {
+                best = cp;
+                best_pi = pi;
+            }
         }
+        if (best)
+            return best;
     }
     return NULL;
 }

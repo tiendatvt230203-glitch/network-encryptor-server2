@@ -493,7 +493,6 @@ int frag_try_reassemble(struct frag_table *ft,
             out_buf[14 + 10] = (uint8_t)(cksum >> 8);
             out_buf[14 + 11] = (uint8_t)(cksum & 0xFF);
 
-            /* Transport checksum restoration for TCP/UDP (IPv4) */
             if (entry->orig_proto == 6 && total_payload >= 20) {
                 uint8_t *tcp_seg = out_buf + 14 + entry->ip_hdr_len;
                 int tcp_seg_len = (int)total_payload;
@@ -568,7 +567,6 @@ int frag_split_and_encrypt_l2(struct packet_crypto_ctx *ctx,
 
     uint16_t pkt_id = frag_next_pkt_id();
 
-    /* fragment 0 */
     {
         uint32_t off = 0;
         memcpy(frag1, eth_hdr, 14);
@@ -604,7 +602,6 @@ int frag_split_and_encrypt_l2(struct packet_crypto_ctx *ctx,
         *frag1_len = (uint32_t)enc_len;
     }
 
-    /* fragment 1 - TỐI ƯU: Chỉ Eth + FRAG_HDR + half2 payload, KHÔNG có IP header */
     {
         uint32_t off = 0;
         memcpy(frag2, eth_hdr, 14);
@@ -613,11 +610,8 @@ int frag_split_and_encrypt_l2(struct packet_crypto_ctx *ctx,
         frag_write_hdr(frag2 + off, pkt_id, 1);
         off += FRAG_HDR_SIZE;
 
-        /* Chỉ copy nửa sau payload, KHÔNG copy IP header */
         memcpy(frag2 + off, payload + half1, half2);
         off += half2;
-
-        /* Không cần tính checksum vì không có IP header */
 
         int enc_len = crypto_layer2_encrypt(ctx, frag2, off);
         if (enc_len < 0) return -1;
@@ -632,27 +626,20 @@ int frag_is_fragment_l2(const uint8_t *pkt_data, uint32_t pkt_len,
     if (pkt_len < 14 + FRAG_HDR_SIZE + 1)
         return 0;
 
-    /* Byte 14 đầu tiên của FRAG_HDR là pkt_id high byte
-     * Kiểm tra: nếu byte 14 không phải IP version (4 hoặc 6) → có thể là fragment */
     uint8_t first_byte = pkt_data[14] >> 4;
     if (first_byte == 4 || first_byte == 6)
-        return 0;  /* Đây là gói IP bình thường, không phải fragment */
+        return 0;
 
-    /* Đọc FRAG_HDR */
     frag_read_hdr(pkt_data + 14, pkt_id, frag_index);
-    
-    /* Fragment 0: có IP header sau FRAG_HDR
-     * Fragment 1: chỉ có payload sau FRAG_HDR */
+
     if (*frag_index == 0) {
-        /* Fragment 0 phải có IP header */
         if (pkt_len < 14 + FRAG_HDR_SIZE + 20)
             return 0;
         uint8_t inner_ver = pkt_data[14 + FRAG_HDR_SIZE] >> 4;
         if (!(inner_ver == 4 || inner_ver == 6))
             return 0;
     }
-    /* Fragment 1 không cần check IP header */
-    
+
     return 1;
 }
 
@@ -666,7 +653,6 @@ int frag_try_reassemble_l2(struct frag_table *ft,
     uint64_t now = get_time_ns();
 
     if (frag_index == 0) {
-        /* Fragment 0: có IP header đầy đủ */
         if (pkt_len < 14 + FRAG_HDR_SIZE + 20)
             return -1;
 
@@ -699,7 +685,6 @@ int frag_try_reassemble_l2(struct frag_table *ft,
     }
 
     if (frag_index == 1) {
-        /* Fragment 1: CHỈ có payload, KHÔNG có IP header */
         if (pkt_len < 14 + FRAG_HDR_SIZE + 1)
             return -1;
 
@@ -711,7 +696,6 @@ int frag_try_reassemble_l2(struct frag_table *ft,
             return -1;
         }
 
-        /* Payload bắt đầu ngay sau FRAG_HDR (không có IP header) */
         const uint8_t *payload = pkt_data + 14 + FRAG_HDR_SIZE;
         uint32_t payload_len = pkt_len - (14 + FRAG_HDR_SIZE);
 
@@ -735,7 +719,6 @@ int frag_try_reassemble_l2(struct frag_table *ft,
         memcpy(out_buf + off, payload, payload_len);
         off += payload_len;
 
-        /* Lấy ether_type từ entry (đã lưu từ fragment 0) */
         uint16_t orig_etype = ((uint16_t)entry->eth_hdr[12] << 8) | entry->eth_hdr[13];
         if (orig_etype == 0x0800) {
             uint16_t ip_total = (uint16_t)(entry->ip_hdr_len + total_payload);

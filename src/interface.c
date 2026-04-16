@@ -9,23 +9,6 @@
 #include <linux/sockios.h>
 #include <linux/if.h>
 
-
-// Hàm có chữ cons (Consumer): Dùng để Nhận thông tin từ Kernel (RX và Completion).
-// Hàm có chữ prod (Producer): Dùng để Gửi thông tin cho Kernel (TX và Fill).
-
-
-// xsk_ring_cons_peek() : kiểm tra xem có bao nhiêu gói tin mới trong RX ring
-// xsk_ring_cons_rx_desc : truy cập vào ring để lấy ra addr 
-// xsk_ring_cons_release() : xác nhận đã đọc xong
-// xsk_ring_prod_reserve() : Đặt chỗ trước trong Fill ring
-// xsk_ring_prod__fill_addr() : Ghi địa chỉ ô nhớ trống vào vị trí đã đặt chỗ
-// xsk_ring_prod_submit() : Chốt đơn
-// xsk_ring_prod__reserve(): (Giống Fill Ring) Đặt chỗ để gửi gói
-// xsk_ring_prod__tx_desc: Ghi thông tin gói tin muốn gửi (địa chỉ, độ dài) vào TX Ring.
-// xsk_ring_cons__peek: Kiểm tra xem Kernel đã gửi xong bao nhiêu gói.
-// xsk_ring_cons__comp_addr: Lấy lại cái addr của gói đã gửi thành công để bạn đem đi tái sử dụng (thường là đẩy lại vào Fill Ring).
-// xsk_ring_cons__release: Xác nhận đã nhận lại địa chỉ từ Completion Ring.
-
 static int config_map_fds[MAX_INTERFACES]; 
 static int config_map_fd_count = 0;
 
@@ -1030,9 +1013,6 @@ int interface_recv_single_queue(struct xsk_interface *iface, int queue_idx,
     struct xsk_queue *queue = &iface->queues[queue_idx];
     uint32_t idx_rx = 0;
     
-
-    // Nhìn vào RX ring để xem có bao nhiêu gói tin được kernel đặt ở đó
-    // Hiện tại đang set một lần call RX ring là 1024 gói tin một lúc
     int rcvd = xsk_ring_cons__peek(&queue->rx, max_pkts, &idx_rx);
     if (rcvd == 0) {
         struct pollfd pfd = {
@@ -1047,14 +1027,12 @@ int interface_recv_single_queue(struct xsk_interface *iface, int queue_idx,
             return 0;
     }
 
-    // Đẩy gói tin từ Rx ring và addrs để userspace xử lý
     for (int j = 0; j < rcvd; j++) {
         const struct xdp_desc *desc = xsk_ring_cons__rx_desc(&queue->rx, idx_rx + j);
         addrs[j] = desc->addr;
         pkt_ptrs[j] = (uint8_t *)queue->bufs + desc->addr;
         pkt_lens[j] = desc->len;
     }
-    // Xác nhận đã đọc xong 
     xsk_ring_cons__release(&queue->rx, rcvd);
     iface->rx_packets += rcvd;
     return rcvd;
