@@ -108,13 +108,6 @@ CREATE TABLE IF NOT EXISTS xdp_profile_crypto_policy_matches (
     dst_port VARCHAR(32) NOT NULL DEFAULT 'ANY'
 );
 
-CREATE TABLE IF NOT EXISTS xdp_key_slots (
-    id SMALLINT NOT NULL,
-    config_id INT NOT NULL REFERENCES xdp_configs(id) ON DELETE CASCADE,
-    crypto_key TEXT NOT NULL,
-    CONSTRAINT xdp_key_slots_pk PRIMARY KEY (id, config_id)
-);
-
 CREATE INDEX IF NOT EXISTS idx_redirect_config_id ON xdp_redirect_rules(config_id);
 CREATE INDEX IF NOT EXISTS idx_local_config_id ON xdp_local_configs(config_id);
 CREATE INDEX IF NOT EXISTS idx_wan_config_id ON xdp_wan_configs(config_id);
