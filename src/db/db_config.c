@@ -318,10 +318,6 @@ static int load_profiles_and_policies(struct app_config *cfg, PGconn *conn, int 
                 const char *bits = PQgetvalue(res, r, 5);
                 const char *nonce = PQgetvalue(res, r, 6);
                 const char *key_hex = PQgetvalue(res, r, 7);
-                const char *legacy_src_cidr = PQgetvalue(res, r, 8);
-                const char *legacy_src_port = PQgetvalue(res, r, 9);
-                const char *legacy_dst_cidr = PQgetvalue(res, r, 10);
-                const char *legacy_dst_port = PQgetvalue(res, r, 11);
 
                 cp_base.crypto_mode = (mode && (strcasecmp(mode, "gcm") == 0)) ? CRYPTO_MODE_GCM : CRYPTO_MODE_CTR;
                 cp_base.aes_bits = bits ? atoi(bits) : 128;
@@ -356,24 +352,31 @@ static int load_profiles_and_policies(struct app_config *cfg, PGconn *conn, int 
                     "FROM xdp_profile_crypto_policy_matches WHERE policy_id = $1 ORDER BY id",
                     1, NULL, pm, NULL, NULL, 0);
 
-                int use_match_table = 0;
                 int match_rows = 0;
-                if (PQresultStatus(mres) == PGRES_TUPLES_OK) {
-                    match_rows = PQntuples(mres);
-                    use_match_table = (match_rows > 0);
-                } else {
+                if (PQresultStatus(mres) != PGRES_TUPLES_OK) {
                     fprintf(stderr,
-                            "[DB CRYPTO][WARN] policy id=%d failed to read xdp_profile_crypto_policy_matches; using legacy columns\n",
-                            cp_base.id);
+                            "[DB CRYPTO] policy id=%d failed to read xdp_profile_crypto_policy_matches: %s",
+                            cp_base.id,
+                            PQresultErrorMessage(mres));
+                    PQclear(mres);
+                    PQclear(res);
+                    return -1;
                 }
-                if (match_rows <= 0)
-                    match_rows = 1;
+                match_rows = PQntuples(mres);
+                if (match_rows <= 0) {
+                    fprintf(stderr,
+                            "[DB CRYPTO] policy id=%d has no rows in xdp_profile_crypto_policy_matches (required)\n",
+                            cp_base.id);
+                    PQclear(mres);
+                    PQclear(res);
+                    return -1;
+                }
 
                 for (int mr = 0; mr < match_rows; mr++) {
-                    const char *src_cidr = use_match_table ? PQgetvalue(mres, mr, 0) : legacy_src_cidr;
-                    const char *src_port = use_match_table ? PQgetvalue(mres, mr, 1) : legacy_src_port;
-                    const char *dst_cidr = use_match_table ? PQgetvalue(mres, mr, 2) : legacy_dst_cidr;
-                    const char *dst_port = use_match_table ? PQgetvalue(mres, mr, 3) : legacy_dst_port;
+                    const char *src_cidr = PQgetvalue(mres, mr, 0);
+                    const char *src_port = PQgetvalue(mres, mr, 1);
+                    const char *dst_cidr = PQgetvalue(mres, mr, 2);
+                    const char *dst_port = PQgetvalue(mres, mr, 3);
 
                     struct crypto_policy cp_match = cp_base;
                     if (parse_port_range(src_port, &cp_match.src_port_from, &cp_match.src_port_to) != 0) {
